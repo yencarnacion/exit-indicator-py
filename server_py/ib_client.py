@@ -75,7 +75,11 @@ class IBDepthManager:
         await self.ib.connectAsync(self.cfg.host, self.cfg.port, clientId=self.cfg.client_id, timeout=10.0)
         self._on_status(True)
 
-        # (Re)attach event for DOM updates
+        # (Re)attach event for DOM updates (idempotent)
+        try:
+            self.ib.pendingTickersEvent -= self._on_pending_tickers
+        except Exception:
+            pass
         self.ib.pendingTickersEvent += self._on_pending_tickers
 
         # If a symbol was already chosen, (re)subscribe
@@ -132,7 +136,16 @@ class IBDepthManager:
 
     # --- event wiring ---
 
-    def _on_pending_tickers(self, tickers: List[Ticker]):
+    def _on_pending_tickers(self, *args):
+        """
+        Works with ib_async 2.x (no args) and ib_insync-style (list arg).
+        """
+        try:
+            tickers = (args[0] if args and isinstance(args[0], (list, tuple, set))
+                       else self.ib.pendingTickers())
+        except Exception:
+            tickers = []
+
         if not self._ticker or self._ticker not in tickers:
             return
         # throttle emits
