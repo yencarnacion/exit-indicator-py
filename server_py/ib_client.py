@@ -147,15 +147,21 @@ class IBDepthManager:
             self._ticker = None
             self._contract = None
 
+            print(f"DEBUG: Subscribing. Symbol: {symbol}, Smart: {self.cfg.smart_depth}")
             # SMART when aggregating; single venue fallback otherwise
             venue = "SMART" if self.cfg.smart_depth else "ISLAND"
+            print(f"DEBUG: Initial venue for Stock(): {venue}")
             contract = Stock(symbol, venue, "USD")
+            print(f"DEBUG: Qualifying contract: {contract}")
             (contract,) = await self.ib.qualifyContractsAsync(contract)
+            print(f"DEBUG: Contract QUALIFIED: {contract}")
             # request top-10; aggregated when smart_depth==True
             self._ticker = self.ib.reqMktDepth(
                 contract, numRows=10, isSmartDepth=self.cfg.smart_depth
             )
             self._contract = contract
+            print(f"DEBUG: Stored self._contract: {self._contract}")
+            print(f"DEBUG: Created self._ticker object: {self._ticker}")
 
             # Listen to updates on *this* ticker (most reliable in ib_async 2.x)
             try:
@@ -164,6 +170,7 @@ class IBDepthManager:
                 pass
             self._ticker.updateEvent += self._on_ticker_update
         except Exception as e:
+            print(f"ERROR during _subscribe_symbol for {symbol}: {e}")
             self._on_error(f"subscribe {symbol}: {e}")
 
     # --- event wiring ---
@@ -172,6 +179,7 @@ class IBDepthManager:
         print(f"DEBUG: _on_ticker_update called for ticker {ticker.contract.symbol}")
         if ticker is not self._ticker:
             return
+        print("DEBUG: _on_ticker_update - Passed ticker check, proceeding to throttle...")
         now_ms = util.now() * 1000.0
         if now_ms - self._last_emit_ms < self._throttle_ms:
             print("DEBUG: Throttled, skipping update.")
@@ -234,6 +242,7 @@ class IBDepthManager:
         if not self._ticker or self._ticker not in tickers:
             print("DEBUG: _on_pending_tickers - Ticker mismatch or None, RETURNING.")
             return
+        print("DEBUG: _on_pending_tickers - Passed ticker check, proceeding to throttle...")
         # throttle emits
         now_ms = util.now() * 1000.0
         if now_ms - self._last_emit_ms < self._throttle_ms:
