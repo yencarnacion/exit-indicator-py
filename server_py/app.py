@@ -97,9 +97,8 @@ async def api_start(req: StartReq):
 @app.post("/api/stop")
 async def api_stop():
     state.set_symbol("")
+    await manager.unsubscribe()
     await broadcast_status(state.connected)
-    # Manager keeps connection; subscription is effectively cleared by not resubscribing
-    await manager.subscribe_symbol("") # no-op; safe
     return {"ok": True}
 @app.post("/api/threshold")
 async def api_threshold(req: ThresholdReq):

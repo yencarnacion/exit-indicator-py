@@ -18,6 +18,8 @@
   let audioReady = false;
   let soundURL = '';
   let soundAvailable = false;
+  let loadingTimer = null;
+  let waitingForData = false;
   function setStatus(connected, symbol) {
     els.status.textContent = connected ? (symbol ? `Live on ${symbol}` : 'Connected') : 'Disconnected';
     els.status.className = 'badge ' + (connected ? 'badge-live' : 'badge-disconnected');
@@ -32,7 +34,7 @@
   function setBookTitle(side) {
     if (!els.bookTitle) return;
     const label = side === 'BID' ? 'Bid' : 'Offer';
-    els.bookTitle.textContent = `Top‑10 ${label} Levels (SMART aggregated)`;
+    els.bookTitle.textContent = `Top‑10 ${label} Levels`;
   }
   function formatShares(n) {
     if (!Number.isFinite(n)) return String(n);
@@ -94,6 +96,35 @@
     }
     beepFallback();
   }
+  function showLoadingState() {
+    const tbody = els.bookBody;
+    tbody.innerHTML = '';
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 3;
+    td.style.textAlign = 'center';
+    td.style.padding = '2rem';
+    td.style.color = '#888';
+    td.textContent = 'Waiting for market data...';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  function clearLoadingTimer() {
+    if (loadingTimer) {
+      clearTimeout(loadingTimer);
+      loadingTimer = null;
+    }
+    waitingForData = false;
+  }
+  function startLoadingTimer() {
+    clearLoadingTimer();
+    waitingForData = true;
+    loadingTimer = setTimeout(() => {
+      if (waitingForData) {
+        showLoadingState();
+      }
+    }, 5000);
+  }
   function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -130,6 +161,7 @@
     };
   }
   function renderBook(asks) {
+    clearLoadingTimer();
     const tbody = els.bookBody;
     const thr = Math.max(1, parseInt(els.thr.value || '0', 10) || 1);
     tbody.innerHTML = '';
@@ -212,9 +244,13 @@
     if (!res.ok) {
       const txt = await res.text();
       appendError(`Start failed: ${txt}`);
+    } else {
+      // Start loading timer - show loading state if no data after 5s
+      startLoadingTimer();
     }
   }
   async function stop() {
+    clearLoadingTimer();
     const res = await fetch('/api/stop', { method: 'POST' });
     if (!res.ok) {
       const txt = await res.text();

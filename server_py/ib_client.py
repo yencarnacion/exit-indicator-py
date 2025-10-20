@@ -54,11 +54,16 @@ class IBDepthManager:
 
     def stop(self):
         self._stop.set()
-        try:
-            if self._ticker and self._contract:
+        # Cancel any active subscriptions
+        if self._ticker and self._contract:
+            try:
                 self.ib.cancelMktDepth(self._contract)
-        except Exception:
-            pass
+            except Exception:
+                pass
+        self._ticker = None
+        self._contract = None
+        self._symbol = ""
+        # Disconnect from IB
         try:
             if self.ib.isConnected():
                 self.ib.disconnect()
@@ -78,10 +83,32 @@ class IBDepthManager:
             await self._subscribe_symbol(self._symbol)
 
     async def subscribe_symbol(self, symbol: str):
-        self._symbol = symbol.strip().upper()
+        sym = symbol.strip().upper()
+        # Prevent empty symbol subscriptions
+        if not sym:
+            await self.unsubscribe()
+            return
+        # Skip resubscription if already subscribed to the same symbol
+        if sym == self._symbol and self._ticker and self._contract:
+            return
+        self._symbol = sym
         if not self.ib.isConnected():
             return
         await self._subscribe_symbol(self._symbol)
+
+    async def unsubscribe(self):
+        """
+        Cancel current market depth subscription and clear symbol.
+        Only cancels if a subscription is active to avoid Error 318.
+        """
+        self._symbol = ""
+        if self._ticker and self._contract:
+            try:
+                self.ib.cancelMktDepth(self._contract)
+            except Exception:
+                pass
+        self._ticker = None
+        self._contract = None
 
     async def _subscribe_symbol(self, symbol: str):
         try:
@@ -94,10 +121,10 @@ class IBDepthManager:
             self._ticker = None
             self._contract = None
 
-            # Qualify and subscribe SMART depth
-            contract = Stock(symbol, "SMART", "USD")
+            # Qualify and subscribe to ISLAND (Nasdaq) for non-aggregated depth
+            contract = Stock(symbol, "ISLAND", "USD")
             (contract,) = await self.ib.qualifyContractsAsync(contract)
-            # requested 10 rows; SMART depth is True to aggregate venues
+            # requested 10 rows; non-aggregated depth from ISLAND exchange
             self._ticker = self.ib.reqMktDepth(contract, numRows=10, isSmartDepth=self.cfg.smart_depth)
             self._contract = contract
         except Exception as e:

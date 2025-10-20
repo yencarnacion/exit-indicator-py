@@ -3,7 +3,7 @@ port: 8086
 default_threshold_shares: 20000
 sound_file: "./web/sounds/hey.mp3"
 cooldown_seconds: 1
-smart_depth: true
+smart_depth: false
 levels_to_scan: 10
 price_reference: "best_ask"
 log_level: "info"
