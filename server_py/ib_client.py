@@ -174,14 +174,21 @@ class IBDepthManager:
             return
         now_ms = util.now() * 1000.0
         if now_ms - self._last_emit_ms < self._throttle_ms:
+            print("DEBUG: Throttled, skipping update.")
             return
         self._last_emit_ms = now_ms
+        print("DEBUG: Trying to convert domAsks...")
         asks = self._convert_dom(ticker.domAsks, "ASK")
+        print(f"DEBUG: Converted asks (count: {len(asks)})")
+        print("DEBUG: Trying to convert domBids...")
         bids = self._convert_dom(ticker.domBids, "BID")
-        print(f"DEBUG: Snapshot processed. Asks: {len(asks)}, Bids: {len(bids)}")
+        print(f"DEBUG: Converted bids (count: {len(bids)})")
+        print("DEBUG: Trying to call _on_snapshot...")
         try:
             self._on_snapshot(self._symbol, asks, bids)
+            print("DEBUG: _on_snapshot call succeeded.")
         except Exception as e:
+            print(f"ERROR calling _on_snapshot: {e}")
             self._on_error(f"snapshot emit: {e}")
 
     def _on_ib_error(self, *args):
@@ -212,17 +219,24 @@ class IBDepthManager:
         # throttle emits
         now_ms = util.now() * 1000.0
         if now_ms - self._last_emit_ms < self._throttle_ms:
+            print("DEBUG: _on_pending_tickers - Throttled, skipping update.")
             return
         self._last_emit_ms = now_ms
 
         t = self._ticker
         print(f"DEBUG: _on_pending_tickers processing ticker {t.contract.symbol}")
+        print("DEBUG: _on_pending_tickers - Trying to convert domAsks...")
         asks = self._convert_dom(t.domAsks, "ASK")
+        print(f"DEBUG: _on_pending_tickers - Converted asks (count: {len(asks)})")
+        print("DEBUG: _on_pending_tickers - Trying to convert domBids...")
         bids = self._convert_dom(t.domBids, "BID")
-        print(f"DEBUG: _on_pending_tickers snapshot processed. Asks: {len(asks)}, Bids: {len(bids)}")
+        print(f"DEBUG: _on_pending_tickers - Converted bids (count: {len(bids)})")
+        print("DEBUG: _on_pending_tickers - Trying to call _on_snapshot...")
         try:
             self._on_snapshot(self._symbol, asks, bids)
+            print("DEBUG: _on_pending_tickers - _on_snapshot call succeeded.")
         except Exception as e:
+            print(f"ERROR in _on_pending_tickers calling _on_snapshot: {e}")
             self._on_error(f"snapshot emit: {e}")
 
     @staticmethod
