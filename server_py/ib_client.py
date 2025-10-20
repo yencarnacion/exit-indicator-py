@@ -180,11 +180,25 @@ class IBDepthManager:
         if ticker is not self._ticker:
             return
         print("DEBUG: _on_ticker_update - Passed ticker check, proceeding to throttle...")
-        now_ms = util.now() * 1000.0
-        if now_ms - self._last_emit_ms < self._throttle_ms:
-            print("DEBUG: Throttled, skipping update.")
-            return
-        self._last_emit_ms = now_ms
+        
+        now_ms = 0  # Initialize
+        try:
+            # Isolate time calculation
+            print("DEBUG: _on_ticker_update - About to call util.now()")
+            now_ms = util.now() * 1000.0
+            print(f"DEBUG: _on_ticker_update - Calculated now_ms: {now_ms}")
+            
+            # Throttle check uses now_ms calculated above
+            if now_ms - self._last_emit_ms < self._throttle_ms:
+                print("DEBUG: _on_ticker_update - Throttled, skipping.")
+                return
+            self._last_emit_ms = now_ms
+            print("DEBUG: _on_ticker_update - Passed throttle check.")
+        except Exception as e:
+            # Catch errors specifically during time/throttle logic
+            print(f"ERROR during time/throttle calculation in _on_ticker_update: {e}")
+            return  # Exit if this part fails
+        
         print("DEBUG: Trying to convert domAsks...")
         asks = self._convert_dom(ticker.domAsks, "ASK")
         print(f"DEBUG: Converted asks (count: {len(asks)})")
@@ -243,12 +257,24 @@ class IBDepthManager:
             print("DEBUG: _on_pending_tickers - Ticker mismatch or None, RETURNING.")
             return
         print("DEBUG: _on_pending_tickers - Passed ticker check, proceeding to throttle...")
-        # throttle emits
-        now_ms = util.now() * 1000.0
-        if now_ms - self._last_emit_ms < self._throttle_ms:
-            print("DEBUG: _on_pending_tickers - Throttled, skipping update.")
-            return
-        self._last_emit_ms = now_ms
+        
+        now_ms = 0  # Initialize
+        try:
+            # Isolate time calculation
+            print("DEBUG: _on_pending_tickers - About to call util.now()")
+            now_ms = util.now() * 1000.0
+            print(f"DEBUG: _on_pending_tickers - Calculated now_ms: {now_ms}")
+            
+            # Throttle check uses now_ms calculated above
+            if now_ms - self._last_emit_ms < self._throttle_ms:
+                print("DEBUG: _on_pending_tickers - Throttled, skipping update.")
+                return
+            self._last_emit_ms = now_ms
+            print("DEBUG: _on_pending_tickers - Passed throttle check.")
+        except Exception as e:
+            # Catch errors specifically during time/throttle logic
+            print(f"ERROR during time/throttle calculation in _on_pending_tickers: {e}")
+            return  # Exit if this part fails
 
         t = self._ticker
         print(f"DEBUG: _on_pending_tickers processing ticker {t.contract.symbol}")
