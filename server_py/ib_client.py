@@ -3,7 +3,7 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Optional, Tuple, List
-from ib_insync import IB, Stock, util, Contract, Ticker, DOMLevel
+from ib_async import IB, Stock, util, Contract, Ticker, DOMLevel
 from .depth import DepthLevel
 
 @dataclass
