@@ -106,6 +106,11 @@ class IBDepthManager:
         Only cancels if a subscription is active to avoid Error 318.
         """
         self._symbol = ""
+        if self._ticker:
+            try:
+                self._ticker.updateEvent -= self._on_ticker_update
+            except Exception:
+                pass
         if self._ticker and self._contract:
             try:
                 self.ib.cancelMktDepth(self._contract)
@@ -117,6 +122,11 @@ class IBDepthManager:
     async def _subscribe_symbol(self, symbol: str):
         try:
             # Cancel previous
+            if self._ticker:
+                try:
+                    self._ticker.updateEvent -= self._on_ticker_update
+                except Exception:
+                    pass
             if self._ticker and self._contract:
                 try:
                     self.ib.cancelMktDepth(self._contract)
@@ -125,16 +135,40 @@ class IBDepthManager:
             self._ticker = None
             self._contract = None
 
-            # Qualify and subscribe to ISLAND (Nasdaq) for non-aggregated depth
-            contract = Stock(symbol, "ISLAND", "USD")
+            # SMART when aggregating; single venue fallback otherwise
+            venue = "SMART" if self.cfg.smart_depth else "ISLAND"
+            contract = Stock(symbol, venue, "USD")
             (contract,) = await self.ib.qualifyContractsAsync(contract)
-            # requested 10 rows; non-aggregated depth from ISLAND exchange
-            self._ticker = self.ib.reqMktDepth(contract, numRows=10, isSmartDepth=self.cfg.smart_depth)
+            # request top-10; aggregated when smart_depth==True
+            self._ticker = self.ib.reqMktDepth(
+                contract, numRows=10, isSmartDepth=self.cfg.smart_depth
+            )
             self._contract = contract
+
+            # Listen to updates on *this* ticker (most reliable in ib_async 2.x)
+            try:
+                self._ticker.updateEvent -= self._on_ticker_update
+            except Exception:
+                pass
+            self._ticker.updateEvent += self._on_ticker_update
         except Exception as e:
             self._on_error(f"subscribe {symbol}: {e}")
 
     # --- event wiring ---
+
+    def _on_ticker_update(self, ticker: Ticker, *_):
+        if ticker is not self._ticker:
+            return
+        now_ms = util.now() * 1000.0
+        if now_ms - self._last_emit_ms < self._throttle_ms:
+            return
+        self._last_emit_ms = now_ms
+        asks = self._convert_dom(ticker.domAsks, "ASK")
+        bids = self._convert_dom(ticker.domBids, "BID")
+        try:
+            self._on_snapshot(self._symbol, asks, bids)
+        except Exception as e:
+            self._on_error(f"snapshot emit: {e}")
 
     def _on_pending_tickers(self, *args):
         """
