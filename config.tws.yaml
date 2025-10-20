@@ -1,0 +1,14 @@
+# Web/UI
+port: 8086
+default_threshold_shares: 20000
+sound_file: "./web/sounds/hey.mp3"
+cooldown_seconds: 1
+smart_depth: true
+levels_to_scan: 10
+price_reference: "best_ask"
+log_level: "info"
+
+# TWS / IB Gateway (macOS)
+ib_host: "127.0.0.1"
+ib_port: 7497       # 7497=paper, 7496=live
+ib_client_id: 1337  # arbitrary client id; use a unique number per app instance

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>exit-indicator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="/styles.css"/>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>exit-indicator</h1>
+      <div class="header-right">
+        <label class="switch" title="Compact mode">
+          <input id="compactToggle" type="checkbox" />
+          <span class="slider"></span>
+          <span class="switch-label">Compact</span>
+        </label>
+        <span id="statusBadge" class="badge badge-disconnected">Disconnected</span>
+      </div>
+    </header>
+
+    <section class="controls">
+      <div class="field">
+        <label for="symbolInput">Ticker</label>
+        <input id="symbolInput" type="text" placeholder="AAPL" autocomplete="off"/>
+      </div>
+      <div class="field">
+        <label>Side</label>
+        <div class="radio-group" id="sideGroup">
+          <label class="radio">
+            <input type="radio" name="side" id="sideAsk" value="ASK" checked />
+            <span>Offer</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="side" id="sideBid" value="BID" />
+            <span>Bid</span>
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <label for="thresholdInput">Threshold (shares)</label>
+        <input id="thresholdInput" type="number" min="1"/>
+      </div>
+      <div class="buttons">
+        <button id="startBtn">Subscribe</button>
+        <button id="stopBtn" class="secondary">Stop</button>
+        <button id="testSoundBtn" class="secondary">Test Sound</button>
+      </div>
+    </section>
+
+    <section class="book">
+      <div class="section-header">
+        <h2 id="bookTitle">Top‑10 Offer Levels (SMART aggregated)</h2>
+        <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
+          <span class="chip chip-neutral">&lt;1×</span>
+          <span class="chip chip-warn">1.0–1.5×</span>
+          <span class="chip chip-hot">1.5–2.0×</span>
+          <span class="chip chip-danger">≥2×</span>
+        </div>
+      </div>
+      <table id="bookTable">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th class="col-price">Price</th>
+            <th class="col-size">Agg. Size</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="alerts">
+      <h2>Alert Log</h2>
+      <div id="alertLog" class="log"></div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
