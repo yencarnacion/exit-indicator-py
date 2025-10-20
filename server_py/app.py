@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
@@ -75,8 +75,8 @@ def _sound(filename: str):
 # --- API models ---
 class StartReq(BaseModel):
     symbol: str
-    threshold: int | None = None
-    side: str | None = None
+    threshold: Optional[int] = None
+    side: Optional[str] = None
 
 class ThresholdReq(BaseModel):
     threshold: int
