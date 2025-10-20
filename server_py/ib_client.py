@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Optional, Tuple, List
@@ -184,8 +185,8 @@ class IBDepthManager:
         now_ms = 0  # Initialize
         try:
             # Isolate time calculation
-            print("DEBUG: _on_ticker_update - About to call util.now()")
-            now_ms = util.now() * 1000.0
+            print("DEBUG: _on_ticker_update - About to call time.time()")
+            now_ms = time.time() * 1000.0
             print(f"DEBUG: _on_ticker_update - Calculated now_ms: {now_ms}")
             
             # Throttle check uses now_ms calculated above
@@ -261,8 +262,8 @@ class IBDepthManager:
         now_ms = 0  # Initialize
         try:
             # Isolate time calculation
-            print("DEBUG: _on_pending_tickers - About to call util.now()")
-            now_ms = util.now() * 1000.0
+            print("DEBUG: _on_pending_tickers - About to call time.time()")
+            now_ms = time.time() * 1000.0
             print(f"DEBUG: _on_pending_tickers - Calculated now_ms: {now_ms}")
             
             # Throttle check uses now_ms calculated above
