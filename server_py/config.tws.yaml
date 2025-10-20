@@ -10,5 +10,5 @@ log_level: "info"
 
 # TWS / IB Gateway (macOS)
 ib_host: "127.0.0.1"
-ib_port: 7497       # 7497=paper, 7496=live
+ib_port: 7496       # 7497=paper, 7496=live
 ib_client_id: 1337  # arbitrary client id; use a unique number per app instance
