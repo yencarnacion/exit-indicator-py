@@ -214,7 +214,25 @@ class IBDepthManager:
             tickers = []
 
         print(f"DEBUG: _on_pending_tickers called with {len(tickers)} tickers")
+        
+        # Detailed diagnostic checks
+        print(f"DEBUG: self._ticker is {'set' if self._ticker else 'None'}")
+        if self._ticker:
+            print(f"DEBUG: self._ticker contract: {self._ticker.contract}")
+            is_in_list = self._ticker in tickers
+            print(f"DEBUG: Is self._ticker in tickers list? {is_in_list}")
+            if not is_in_list and tickers:  # If mismatch, show what IS in the list
+                print(f"DEBUG: Tickers actually in list: {[t.contract for t in tickers]}")
+                # Also check by contract equality, not just object identity
+                try:
+                    contracts_match = any(t.contract == self._ticker.contract for t in tickers)
+                    print(f"DEBUG: Does any ticker in list have SAME CONTRACT as self._ticker? {contracts_match}")
+                except Exception as e:
+                    print(f"ERROR comparing contracts: {e}")
+        
+        # The original check:
         if not self._ticker or self._ticker not in tickers:
+            print("DEBUG: _on_pending_tickers - Ticker mismatch or None, RETURNING.")
             return
         # throttle emits
         now_ms = util.now() * 1000.0
