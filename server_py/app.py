@@ -157,11 +157,15 @@ async def broadcast_error(msg: str):
         await broadcast({"type": "error", "data": {"message": msg}})
 # --- DOM → aggregation glue ---
 async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthLevel]):
+    print(f"DEBUG: on_dom_snapshot received data. Symbol: {symbol}, Current state symbol: {state.symbol}")
     # Ignore snapshots for stale symbols
     if symbol != state.symbol:
+        print("DEBUG: Symbol mismatch, discarding snapshot.")
         return
     levels, alerts = aggregate_top10(state, asks, bids)
+    print(f"DEBUG: Aggregated book. Levels: {len(levels)}, Alerts: {len(alerts)}")
     if levels:
+        print(f"DEBUG: Broadcasting book with {len(levels)} levels for side {state.side}")
         await broadcast_book(levels, state.side)
     for a in alerts:
         await broadcast_alert(a)

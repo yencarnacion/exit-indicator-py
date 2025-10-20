@@ -169,6 +169,7 @@ class IBDepthManager:
     # --- event wiring ---
 
     def _on_ticker_update(self, ticker: Ticker, *_):
+        print(f"DEBUG: _on_ticker_update called for ticker {ticker.contract.symbol}")
         if ticker is not self._ticker:
             return
         now_ms = util.now() * 1000.0
@@ -177,6 +178,7 @@ class IBDepthManager:
         self._last_emit_ms = now_ms
         asks = self._convert_dom(ticker.domAsks, "ASK")
         bids = self._convert_dom(ticker.domBids, "BID")
+        print(f"DEBUG: Snapshot processed. Asks: {len(asks)}, Bids: {len(bids)}")
         try:
             self._on_snapshot(self._symbol, asks, bids)
         except Exception as e:
@@ -204,6 +206,7 @@ class IBDepthManager:
         except Exception:
             tickers = []
 
+        print(f"DEBUG: _on_pending_tickers called with {len(tickers)} tickers")
         if not self._ticker or self._ticker not in tickers:
             return
         # throttle emits
@@ -213,8 +216,10 @@ class IBDepthManager:
         self._last_emit_ms = now_ms
 
         t = self._ticker
+        print(f"DEBUG: _on_pending_tickers processing ticker {t.contract.symbol}")
         asks = self._convert_dom(t.domAsks, "ASK")
         bids = self._convert_dom(t.domBids, "BID")
+        print(f"DEBUG: _on_pending_tickers snapshot processed. Asks: {len(asks)}, Bids: {len(bids)}")
         try:
             self._on_snapshot(self._symbol, asks, bids)
         except Exception as e:
@@ -233,4 +238,5 @@ class IBDepthManager:
             size = int(r.size or 0)
             venue = getattr(r, "mm", "") or getattr(r, "exchange", "") or "SMART"
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
+        print(f"DEBUG: _convert_dom converted {len(rows or [])} rows for side {side} into {len(out)} DepthLevels")
         return out
