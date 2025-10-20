@@ -73,6 +73,11 @@ class IBDepthManager:
     async def _connect_once(self):
         # ib_insync integrates with asyncio loop when using connectAsync
         await self.ib.connectAsync(self.cfg.host, self.cfg.port, clientId=self.cfg.client_id, timeout=10.0)
+        # 1 = real-time, 2 = frozen, 3 = delayed, 4 = delayed-frozen
+        try:
+            self.ib.reqMarketDataType(1)
+        except Exception:
+            pass
         self._on_status(True)
 
         # (Re)attach event for DOM updates (idempotent)
@@ -81,6 +86,13 @@ class IBDepthManager:
         except Exception:
             pass
         self.ib.pendingTickersEvent += self._on_pending_tickers
+
+        # (Re)attach error handler
+        try:
+            self.ib.errorEvent -= self._on_ib_error
+        except Exception:
+            pass
+        self.ib.errorEvent += self._on_ib_error
 
         # If a symbol was already chosen, (re)subscribe
         if self._symbol:
@@ -169,6 +181,18 @@ class IBDepthManager:
             self._on_snapshot(self._symbol, asks, bids)
         except Exception as e:
             self._on_error(f"snapshot emit: {e}")
+
+    def _on_ib_error(self, *args):
+        # Typical signature: (reqId, code, msg, advancedJson)
+        try:
+            code = args[1] if len(args) >= 2 else None
+            msg  = args[2] if len(args) >= 3 else " ".join(map(str, args))
+        except Exception:
+            code, msg = None, str(args)
+        # Ignore harmless chatter; DO NOT hide 10167 or 354/355 entitlement errors.
+        if code in {2104, 2106, 2158, 310}:  # 310 = depth reset
+            return
+        self._on_error(f"IB error{'' if code is None else f' {code}'}: {msg}")
 
     def _on_pending_tickers(self, *args):
         """
