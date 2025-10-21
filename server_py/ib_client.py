@@ -103,37 +103,31 @@ class IBDepthManager:
     async def unsubscribe(self):
         log_debug(f"unsubscribe() called. Cleaning up '{self._symbol}'.")
         
-        # Store objects to be cancelled in local vars before clearing state
         contract_to_cancel = self._contract
         ticker_to_cancel = self._ticker
         quote_ticker_to_cancel = self._quote_ticker
 
-        # Immediately clear instance state to prevent race conditions
         self._symbol = ""
         self._contract = None
         self._ticker = None
         self._quote_ticker = None
         self._last_price, self._day_volume = None, None
 
-        # Detach event handlers
-        if ticker_to_cancel:
-            try: ticker_to_cancel.updateEvent -= self._on_ticker_update
-            except: pass
         if quote_ticker_to_cancel:
             try: quote_ticker_to_cancel.updateEvent -= self._on_quote_update
             except: pass
 
-        # Cancel IB subscriptions if a contract existed
         if contract_to_cancel:
-            log_debug(f"Sending cancellation requests for conId={contract_to_cancel.conId}")
-            try: self.ib.cancelMktDepth(contract_to_cancel)
+            log_debug(f"Sending cancellation requests for conId={contract_to_cancel.conId} (smartDepth={self.cfg.smart_depth})")
+            
+            # *** THE CORRECT FIX APPLIED HERE ***
+            # The isSmartDepth flag MUST match the original request.
+            try: self.ib.cancelMktDepth(contract_to_cancel, isSmartDepth=self.cfg.smart_depth)
             except Exception as e: log_debug(f"Non-fatal error on cancelMktDepth: {e}")
             
             try: self.ib.cancelMktData(contract_to_cancel)
             except Exception as e: log_debug(f"Non-fatal error on cancelMktData: {e}")
 
-            # *** THE CRUCIAL FIX ***
-            # Give the IB Gateway a moment to process the cancellations before proceeding.
             log_debug("Pausing for 0.5s to allow Gateway to process cancellations...")
             await asyncio.sleep(0.5)
         
@@ -155,12 +149,10 @@ class IBDepthManager:
             self._contract = qualified_contract
             log_debug(f"Contract QUALIFIED: {self._contract.conId}, {self._contract.symbol}")
 
-            # Create new Ticker objects for the new subscription
             self._ticker = self.ib.reqMktDepth(
                 self._contract, numRows=10, isSmartDepth=self.cfg.smart_depth
             )
             log_debug(f"Created new MktDepth subscription for {self._symbol}.")
-            self._ticker.updateEvent += self._on_ticker_update
 
             self._quote_ticker = self.ib.reqMktData(self._contract, "", False, False)
             log_debug(f"Created new MktData subscription for {self._symbol}.")
@@ -171,27 +163,30 @@ class IBDepthManager:
             self._on_error(f"Subscribe {symbol}: {e}")
             self._symbol = "" # Clear symbol on failure
 
-    def _on_ticker_update(self, ticker: Ticker, hasNewData: bool):
-        if ticker is not self._ticker: return
-        now_ms = time.time() * 1000.0
-        if now_ms - self._last_emit_ms < self._throttle_ms: return
-        self._last_emit_ms = now_ms
-
-        if self._symbol and self._symbol == ticker.contract.symbol:
-            asks = self._convert_dom(ticker.domAsks, "ASK")
-            bids = self._convert_dom(ticker.domBids, "BID")
-            self._on_snapshot(self._symbol, asks, bids)
-
     def _on_ib_error(self, reqId, code, msg, contract):
         log_debug(f"RAW IB ERROR RECEIVED - reqId: {reqId}, code: {code}, msg: '{msg}'")
-        # Ignore informational messages and expected cancellation errors
-        if code in {2104, 2106, 2158, 2152, 310}: 
+        if code in {2104, 2106, 2158, 2152, 310, 2119}: 
             return
         self._on_error(f"Error {code}, reqId {reqId}: {msg}")
 
     def _on_pending_tickers(self, tickers: List[Ticker]):
-        # This event is less reliable; we rely on the direct Ticker.updateEvent
-        pass
+        """This is the primary event handler for processing all market data updates."""
+        now_ms = time.time() * 1000.0
+        # Check for quote updates first
+        if self._quote_ticker and self._quote_ticker in tickers:
+            self._on_quote_update(self._quote_ticker, True) # Force update
+
+        # Check for depth updates, with throttling
+        if self._ticker and self._ticker in tickers:
+            if now_ms - self._last_emit_ms < self._throttle_ms:
+                return  # Throttle depth updates
+            self._last_emit_ms = now_ms
+            
+            if self._symbol and self._symbol == self._ticker.contract.symbol:
+                log_debug(f"Processing DOM for {self._symbol} via pendingTickersEvent")
+                asks = self._convert_dom(self._ticker.domAsks, "ASK")
+                bids = self._convert_dom(self._ticker.domBids, "BID")
+                self._on_snapshot(self._symbol, asks, bids)
     
     def _on_quote_update(self, ticker: Ticker, hasNewData: bool):
         if ticker is not self._quote_ticker: return
