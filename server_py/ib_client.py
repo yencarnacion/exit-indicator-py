@@ -66,11 +66,11 @@ class IBDepthManager:
                 await asyncio.sleep(min(backoff, 30.0))
                 backoff *= 2.0
 
-    def stop(self):
+    async def stop(self):
         log_debug("stop() called.")
         self._stop.set()
-        # Create a task to perform async cleanup
-        asyncio.create_task(self.unsubscribe())
+        # Ensure cleanup is complete before disconnecting
+        await self.unsubscribe()
         try:
             if self.ib.isConnected():
                 log_debug("Disconnecting from IB...")

@@ -37,8 +37,8 @@ manager = IBDepthManager(
 async def _startup():
     asyncio.create_task(manager.run())
 @app.on_event("shutdown")
-def _shutdown():
-    manager.stop()
+async def _shutdown():
+    await manager.stop()
 # --- static assets (serve existing ./web) ---
 WEB_DIR = Path("web")
 @app.get("/", include_in_schema=False)
