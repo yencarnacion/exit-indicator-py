@@ -1,7 +1,7 @@
 # Web/UI
 port: 8086
 default_threshold_shares: 20000
-sound_file: "./web/sounds/hey.mp3"
+sound_file: "./web/sounds/alarm.mp3"
 cooldown_seconds: 1
 smart_depth: true
 levels_to_scan: 10
