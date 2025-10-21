@@ -203,7 +203,7 @@ class IBDepthManager:
         # Always log the raw error
         log_debug(f"RAW IB ERROR RECEIVED - reqId: {reqId}, code: {code}, msg: '{msg}'")
         # Ignore harmless chatter for application logic, but keep the log
-        if code in {2104, 2106, 2158}:
+        if code in {2104, 2106, 2158, 310}: # 310 = "Can't find subscribed market depth" on unsubscribe
             return
         self._on_error(f"Error {code}, reqId {reqId}: {msg}")
 
