@@ -69,7 +69,6 @@ class IBDepthManager:
     async def stop(self):
         log_debug("stop() called.")
         self._stop.set()
-        # Ensure cleanup is complete before disconnecting
         await self.unsubscribe()
         try:
             if self.ib.isConnected():
@@ -96,89 +95,70 @@ class IBDepthManager:
 
     async def subscribe_symbol(self, symbol: str):
         log_debug(f"subscribe_symbol() called for '{symbol}'. Current symbol: '{self._symbol}'.")
-        if not self.ib.isConnected():
-            # If not connected, just set the symbol. The run loop will subscribe on connect.
-            self._symbol = symbol.strip().upper()
-            return
-        await self._subscribe_symbol(symbol)
+        # First, always clean up any existing subscription.
+        await self.unsubscribe()
+
+        # Now, subscribe to the new symbol if one is provided.
+        sym = symbol.strip().upper()
+        if sym:
+            self._symbol = sym
+            if self.ib.isConnected():
+                await self._subscribe_symbol(self._symbol)
 
     async def unsubscribe(self):
-        """
-        Cancel current market depth and quote subscriptions and clear symbol.
-        """
         log_debug(f"unsubscribe() called. Current symbol: '{self._symbol}'")
-
-        # 1. Detach event handlers first
+        contract_to_cancel = self._contract
+        
+        # Detach event handlers first to prevent callbacks during cancellation
         if self._ticker:
-            try:
-                self._ticker.updateEvent -= self._on_ticker_update
-            except Exception:
-                pass
+            try: self._ticker.updateEvent -= self._on_ticker_update
+            except: pass
         if self._quote_ticker:
-            try:
-                self._quote_ticker.updateEvent -= self._on_quote_update
-            except Exception:
-                pass
+            try: self._quote_ticker.updateEvent -= self._on_quote_update
+            except: pass
 
-        # 2. Cancel IB subscriptions if a contract exists.
-        #    Both subscriptions share the same contract object.
-        if self._contract:
-            # Create a local copy, as state will be cleared
-            contract_to_cancel = self._contract
-            # Cancel depth
-            if self._ticker:
-                try:
-                    log_debug(f"Attempting to cancel MktDepth for conId={contract_to_cancel.conId}")
-                    self.ib.cancelMktDepth(contract_to_cancel)
-                except Exception as e:
-                    log_debug(f"Non-fatal error on cancelMktDepth: {e}")
+        # Cancel IB subscriptions if a contract exists.
+        if contract_to_cancel:
+            log_debug(f"Cancelling subscriptions for conId={contract_to_cancel.conId}")
+            try: self.ib.cancelMktDepth(contract_to_cancel)
+            except Exception as e: log_debug(f"Non-fatal error on cancelMktDepth: {e}")
+            
+            try: self.ib.cancelMktData(contract_to_cancel)
+            except Exception as e: log_debug(f"Non-fatal error on cancelMktData: {e}")
 
-            # Cancel quote
-            if self._quote_ticker:
-                try:
-                    log_debug(f"Attempting to cancel MktData for conId={contract_to_cancel.conId}")
-                    self.ib.cancelMktData(contract_to_cancel)
-                except Exception as e:
-                    log_debug(f"Non-fatal error on cancelMktData: {e}")
-        else:
-            log_debug("No contract found, nothing to cancel on IB side.")
+            # *** THE CRUCIAL FIX ***
+            # Give the IB Gateway a moment to process the cancellations.
+            await asyncio.sleep(0.5)
 
-        # 3. Clear all local state
+        # Clear all local state
         self._symbol = ""
         self._ticker = None
         self._contract = None
         self._quote_ticker = None
         self._last_price, self._day_volume = None, None
-        log_debug("Local state has been cleared.")
+        log_debug("Unsubscribe finished and local state cleared.")
 
 
     async def _subscribe_symbol(self, symbol: str):
-        await self.unsubscribe()
-        sym = symbol.strip().upper()
-        if not sym:
-            log_debug("Symbol is empty, ensuring stopped.")
-            return
-        self._symbol = sym
         log_debug(f"_subscribe_symbol (internal) starting for '{self._symbol}'.")
         try:
             log_debug(f"Qualifying contract: Stock(symbol='{self._symbol}', exchange='SMART', currency='USD')")
-            # SMART when aggregating; single venue fallback otherwise
             venue = "SMART" if self.cfg.smart_depth else "ISLAND"
             contract = Stock(self._symbol, venue, "USD")
             (qualified_contract,) = await self.ib.qualifyContractsAsync(contract)
             self._contract = qualified_contract
-            log_debug(f"Contract QUALIFIED: conId={self._contract.conId}, symbol={self._contract.symbol}, exchange={self._contract.exchange}")
+            log_debug(f"Contract QUALIFIED: {self._contract.conId}, {self._contract.symbol}")
 
             # Request depth
             self._ticker = self.ib.reqMktDepth(
                 self._contract, numRows=10, isSmartDepth=self.cfg.smart_depth
             )
-            log_debug("Requested MktDepth. Ticker object created.")
+            log_debug(f"Requested MktDepth for {self._symbol}.")
             self._ticker.updateEvent += self._on_ticker_update
 
             # Request quote data
             self._quote_ticker = self.ib.reqMktData(self._contract, "", False, False)
-            log_debug("Requested MktData. Quote Ticker created.")
+            log_debug(f"Requested MktData for {self._symbol}.")
             self._quote_ticker.updateEvent += self._on_quote_update
 
         except Exception as e:
@@ -190,27 +170,22 @@ class IBDepthManager:
         now_ms = time.time() * 1000.0
         if now_ms - self._last_emit_ms < self._throttle_ms: return
         self._last_emit_ms = now_ms
-
         asks = self._convert_dom(ticker.domAsks, "ASK")
         bids = self._convert_dom(ticker.domBids, "BID")
         self._on_snapshot(self._symbol, asks, bids)
 
     def _on_ib_error(self, reqId, code, msg, contract):
-        # Always log the raw error
         log_debug(f"RAW IB ERROR RECEIVED - reqId: {reqId}, code: {code}, msg: '{msg}'")
-        # Ignore harmless chatter for application logic, but keep the log
-        if code in {2104, 2106, 2158, 310}: # 310 = "Can't find subscribed market depth" on unsubscribe
+        if code in {2104, 2106, 2158, 310}:
             return
         self._on_error(f"Error {code}, reqId {reqId}: {msg}")
 
     def _on_pending_tickers(self, tickers: List[Ticker]):
         if not self._ticker or self._ticker not in tickers:
             return
-        
         now_ms = time.time() * 1000.0
         if now_ms - self._last_emit_ms < self._throttle_ms: return
         self._last_emit_ms = now_ms
-        
         asks = self._convert_dom(self._ticker.domAsks, "ASK")
         bids = self._convert_dom(self._ticker.domBids, "BID")
         self._on_snapshot(self._symbol, asks, bids)
@@ -219,10 +194,10 @@ class IBDepthManager:
         if ticker is not self._quote_ticker: return
         
         lp = getattr(ticker, "last", None)
-        if lp is not None and util.isNan(lp) is False: self._last_price = float(lp)
+        if lp is not None and not util.isNan(lp): self._last_price = float(lp)
 
         vol = getattr(ticker, "volume", None)
-        if vol is not None and util.isNan(vol) is False: self._day_volume = int(vol)
+        if vol is not None and not util.isNan(vol): self._day_volume = int(vol)
 
     def current_quote(self) -> Tuple[Optional[float], Optional[int]]:
         return self._last_price, self._day_volume
