@@ -114,7 +114,7 @@ class IBDepthManager:
 
     async def unsubscribe(self):
         log_debug(f"unsubscribe() called. Current symbol: '{self._symbol}'")
-        log_debug(f"  State before unsubscribe: contract={self._contract}, ticker={self._ticker}, quote_ticker={self._quote_ticker}")
+        log_debug(f"  State before unsubscribe: contract={self._contract}, ticker is {'set' if self._ticker else 'None'}, quote_ticker is {'set' if self._quote_ticker else 'None'}")
 
         self._symbol = "" # Clear symbol immediately
 
@@ -133,14 +133,14 @@ class IBDepthManager:
             
             if self._ticker:
                 try:
-                    log_debug(f"Attempting to cancel MktDepth for conId={contract_to_cancel.conId} with tickerId={self._ticker.reqId}")
+                    log_debug(f"Attempting to cancel MktDepth for conId={contract_to_cancel.conId}")
                     self.ib.cancelMktDepth(contract_to_cancel)
                 except Exception as e:
                     log_debug(f"Error on cancelMktDepth: {e}")
 
             if self._quote_ticker:
                 try:
-                    log_debug(f"Attempting to cancel MktData for conId={contract_to_cancel.conId} with tickerId={self._quote_ticker.reqId}")
+                    log_debug(f"Attempting to cancel MktData for conId={contract_to_cancel.conId}")
                     self.ib.cancelMktData(contract_to_cancel)
                 except Exception as e:
                     log_debug(f"Error on cancelMktData: {e}")
@@ -159,7 +159,9 @@ class IBDepthManager:
         log_debug(f"_subscribe_symbol (internal) starting for '{symbol}'.")
         try:
             # Cancel previous subscriptions first
-            await self.unsubscribe()
+            if self._ticker or self._quote_ticker or self._contract:
+                await self.unsubscribe()
+            
             # Restore the symbol since unsubscribe clears it
             self._symbol = symbol
             log_debug(f"Symbol restored to '{self._symbol}' after clearing previous subscription.")
@@ -175,15 +177,12 @@ class IBDepthManager:
             self._ticker = self.ib.reqMktDepth(
                 self._contract, numRows=10, isSmartDepth=self.cfg.smart_depth
             )
-            # Give IB a moment to process the request and assign a reqId
-            await asyncio.sleep(0.1) 
-            log_debug(f"Requested MktDepth. Ticker object created. reqId={self._ticker.reqId if self._ticker else 'N/A'}")
+            log_debug("Requested MktDepth. Ticker object created.")
             self._ticker.updateEvent += self._on_ticker_update
 
             # Request quote data
             self._quote_ticker = self.ib.reqMktData(self._contract, "", False, False)
-            await asyncio.sleep(0.1)
-            log_debug(f"Requested MktData. Quote Ticker created. reqId={self._quote_ticker.reqId if self._quote_ticker else 'N/A'}")
+            log_debug("Requested MktData. Quote Ticker created.")
             self._quote_ticker.updateEvent += self._on_quote_update
 
         except Exception as e:
@@ -242,3 +241,4 @@ class IBDepthManager:
             venue = getattr(r, "mm", "") or "SMART"
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
         return out
+
