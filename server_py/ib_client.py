@@ -7,6 +7,9 @@ from typing import Callable, Optional, Tuple, List
 from ib_async import IB, Stock, util, Contract, Ticker, DOMLevel
 from .depth import DepthLevel
 
+# Debug flag: Set to True to enable detailed debug logging
+DEBUG = False
+
 @dataclass
 class IBConfig:
     host: str
@@ -148,21 +151,26 @@ class IBDepthManager:
             self._ticker = None
             self._contract = None
 
-            print(f"DEBUG: Subscribing. Symbol: {symbol}, Smart: {self.cfg.smart_depth}")
+            if DEBUG:
+                print(f"DEBUG: Subscribing. Symbol: {symbol}, Smart: {self.cfg.smart_depth}")
             # SMART when aggregating; single venue fallback otherwise
             venue = "SMART" if self.cfg.smart_depth else "ISLAND"
-            print(f"DEBUG: Initial venue for Stock(): {venue}")
+            if DEBUG:
+                print(f"DEBUG: Initial venue for Stock(): {venue}")
             contract = Stock(symbol, venue, "USD")
-            print(f"DEBUG: Qualifying contract: {contract}")
+            if DEBUG:
+                print(f"DEBUG: Qualifying contract: {contract}")
             (contract,) = await self.ib.qualifyContractsAsync(contract)
-            print(f"DEBUG: Contract QUALIFIED: {contract}")
+            if DEBUG:
+                print(f"DEBUG: Contract QUALIFIED: {contract}")
             # request top-10; aggregated when smart_depth==True
             self._ticker = self.ib.reqMktDepth(
                 contract, numRows=10, isSmartDepth=self.cfg.smart_depth
             )
             self._contract = contract
-            print(f"DEBUG: Stored self._contract: {self._contract}")
-            print(f"DEBUG: Created self._ticker object: {self._ticker}")
+            if DEBUG:
+                print(f"DEBUG: Stored self._contract: {self._contract}")
+                print(f"DEBUG: Created self._ticker object: {self._ticker}")
 
             # Listen to updates on *this* ticker (most reliable in ib_async 2.x)
             try:
@@ -171,47 +179,60 @@ class IBDepthManager:
                 pass
             self._ticker.updateEvent += self._on_ticker_update
         except Exception as e:
-            print(f"ERROR during _subscribe_symbol for {symbol}: {e}")
+            if DEBUG:
+                print(f"ERROR during _subscribe_symbol for {symbol}: {e}")
             self._on_error(f"subscribe {symbol}: {e}")
 
     # --- event wiring ---
 
     def _on_ticker_update(self, ticker: Ticker, *_):
-        print(f"DEBUG: _on_ticker_update called for ticker {ticker.contract.symbol}")
+        if DEBUG:
+            print(f"DEBUG: _on_ticker_update called for ticker {ticker.contract.symbol}")
         if ticker is not self._ticker:
             return
-        print("DEBUG: _on_ticker_update - Passed ticker check, proceeding to throttle...")
+        if DEBUG:
+            print("DEBUG: _on_ticker_update - Passed ticker check, proceeding to throttle...")
         
         now_ms = 0  # Initialize
         try:
             # Isolate time calculation
-            print("DEBUG: _on_ticker_update - About to call time.time()")
+            if DEBUG:
+                print("DEBUG: _on_ticker_update - About to call time.time()")
             now_ms = time.time() * 1000.0
-            print(f"DEBUG: _on_ticker_update - Calculated now_ms: {now_ms}")
+            if DEBUG:
+                print(f"DEBUG: _on_ticker_update - Calculated now_ms: {now_ms}")
             
             # Throttle check uses now_ms calculated above
             if now_ms - self._last_emit_ms < self._throttle_ms:
-                print("DEBUG: _on_ticker_update - Throttled, skipping.")
+                if DEBUG:
+                    print("DEBUG: _on_ticker_update - Throttled, skipping.")
                 return
             self._last_emit_ms = now_ms
-            print("DEBUG: _on_ticker_update - Passed throttle check.")
+            if DEBUG:
+                print("DEBUG: _on_ticker_update - Passed throttle check.")
         except Exception as e:
             # Catch errors specifically during time/throttle logic
-            print(f"ERROR during time/throttle calculation in _on_ticker_update: {e}")
+            if DEBUG:
+                print(f"ERROR during time/throttle calculation in _on_ticker_update: {e}")
             return  # Exit if this part fails
         
-        print("DEBUG: Trying to convert domAsks...")
+        if DEBUG:
+            print("DEBUG: Trying to convert domAsks...")
         asks = self._convert_dom(ticker.domAsks, "ASK")
-        print(f"DEBUG: Converted asks (count: {len(asks)})")
-        print("DEBUG: Trying to convert domBids...")
+        if DEBUG:
+            print(f"DEBUG: Converted asks (count: {len(asks)})")
+            print("DEBUG: Trying to convert domBids...")
         bids = self._convert_dom(ticker.domBids, "BID")
-        print(f"DEBUG: Converted bids (count: {len(bids)})")
-        print("DEBUG: Trying to call _on_snapshot...")
+        if DEBUG:
+            print(f"DEBUG: Converted bids (count: {len(bids)})")
+            print("DEBUG: Trying to call _on_snapshot...")
         try:
             self._on_snapshot(self._symbol, asks, bids)
-            print("DEBUG: _on_snapshot call succeeded.")
+            if DEBUG:
+                print("DEBUG: _on_snapshot call succeeded.")
         except Exception as e:
-            print(f"ERROR calling _on_snapshot: {e}")
+            if DEBUG:
+                print(f"ERROR calling _on_snapshot: {e}")
             self._on_error(f"snapshot emit: {e}")
 
     def _on_ib_error(self, *args):
@@ -236,11 +257,13 @@ class IBDepthManager:
         except Exception:
             tickers = []
 
-        print(f"DEBUG: _on_pending_tickers called with {len(tickers)} tickers")
+        if DEBUG:
+            print(f"DEBUG: _on_pending_tickers called with {len(tickers)} tickers")
         
         # Detailed diagnostic checks
-        print(f"DEBUG: self._ticker is {'set' if self._ticker else 'None'}")
-        if self._ticker:
+        if DEBUG:
+            print(f"DEBUG: self._ticker is {'set' if self._ticker else 'None'}")
+        if self._ticker and DEBUG:
             print(f"DEBUG: self._ticker contract: {self._ticker.contract}")
             is_in_list = self._ticker in tickers
             print(f"DEBUG: Is self._ticker in tickers list? {is_in_list}")
@@ -255,42 +278,54 @@ class IBDepthManager:
         
         # The original check:
         if not self._ticker or self._ticker not in tickers:
-            print("DEBUG: _on_pending_tickers - Ticker mismatch or None, RETURNING.")
+            if DEBUG:
+                print("DEBUG: _on_pending_tickers - Ticker mismatch or None, RETURNING.")
             return
-        print("DEBUG: _on_pending_tickers - Passed ticker check, proceeding to throttle...")
+        if DEBUG:
+            print("DEBUG: _on_pending_tickers - Passed ticker check, proceeding to throttle...")
         
         now_ms = 0  # Initialize
         try:
             # Isolate time calculation
-            print("DEBUG: _on_pending_tickers - About to call time.time()")
+            if DEBUG:
+                print("DEBUG: _on_pending_tickers - About to call time.time()")
             now_ms = time.time() * 1000.0
-            print(f"DEBUG: _on_pending_tickers - Calculated now_ms: {now_ms}")
+            if DEBUG:
+                print(f"DEBUG: _on_pending_tickers - Calculated now_ms: {now_ms}")
             
             # Throttle check uses now_ms calculated above
             if now_ms - self._last_emit_ms < self._throttle_ms:
-                print("DEBUG: _on_pending_tickers - Throttled, skipping update.")
+                if DEBUG:
+                    print("DEBUG: _on_pending_tickers - Throttled, skipping update.")
                 return
             self._last_emit_ms = now_ms
-            print("DEBUG: _on_pending_tickers - Passed throttle check.")
+            if DEBUG:
+                print("DEBUG: _on_pending_tickers - Passed throttle check.")
         except Exception as e:
             # Catch errors specifically during time/throttle logic
-            print(f"ERROR during time/throttle calculation in _on_pending_tickers: {e}")
+            if DEBUG:
+                print(f"ERROR during time/throttle calculation in _on_pending_tickers: {e}")
             return  # Exit if this part fails
 
         t = self._ticker
-        print(f"DEBUG: _on_pending_tickers processing ticker {t.contract.symbol}")
-        print("DEBUG: _on_pending_tickers - Trying to convert domAsks...")
+        if DEBUG:
+            print(f"DEBUG: _on_pending_tickers processing ticker {t.contract.symbol}")
+            print("DEBUG: _on_pending_tickers - Trying to convert domAsks...")
         asks = self._convert_dom(t.domAsks, "ASK")
-        print(f"DEBUG: _on_pending_tickers - Converted asks (count: {len(asks)})")
-        print("DEBUG: _on_pending_tickers - Trying to convert domBids...")
+        if DEBUG:
+            print(f"DEBUG: _on_pending_tickers - Converted asks (count: {len(asks)})")
+            print("DEBUG: _on_pending_tickers - Trying to convert domBids...")
         bids = self._convert_dom(t.domBids, "BID")
-        print(f"DEBUG: _on_pending_tickers - Converted bids (count: {len(bids)})")
-        print("DEBUG: _on_pending_tickers - Trying to call _on_snapshot...")
+        if DEBUG:
+            print(f"DEBUG: _on_pending_tickers - Converted bids (count: {len(bids)})")
+            print("DEBUG: _on_pending_tickers - Trying to call _on_snapshot...")
         try:
             self._on_snapshot(self._symbol, asks, bids)
-            print("DEBUG: _on_pending_tickers - _on_snapshot call succeeded.")
+            if DEBUG:
+                print("DEBUG: _on_pending_tickers - _on_snapshot call succeeded.")
         except Exception as e:
-            print(f"ERROR in _on_pending_tickers calling _on_snapshot: {e}")
+            if DEBUG:
+                print(f"ERROR in _on_pending_tickers calling _on_snapshot: {e}")
             self._on_error(f"snapshot emit: {e}")
 
     @staticmethod
@@ -306,5 +341,6 @@ class IBDepthManager:
             size = int(r.size or 0)
             venue = getattr(r, "mm", "") or getattr(r, "exchange", "") or "SMART"
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
-        print(f"DEBUG: _convert_dom converted {len(rows or [])} rows for side {side} into {len(out)} DepthLevels")
+        if DEBUG:
+            print(f"DEBUG: _convert_dom converted {len(rows or [])} rows for side {side} into {len(out)} DepthLevels")
         return out
