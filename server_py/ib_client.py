@@ -8,7 +8,7 @@ from ib_async import IB, Stock, util, Contract, Ticker, DOMLevel
 from .depth import DepthLevel
 
 # --- SET TO TRUE TO ENABLE VERBOSE LOGGING ---
-DEBUG = True
+DEBUG = False
 
 def log_debug(msg: str):
     """Helper for timestamped debug logging."""
