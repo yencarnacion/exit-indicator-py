@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from .config import Config
 from .state import State
 from .sound import sound_info
-from .depth import aggregate_top10, AggregatedLevel, AlertEvent, DepthLevel
+from .depth import aggregate_top10, aggregate_both_top10, AggregatedLevel, AlertEvent, DepthLevel
 from .ib_client import IBConfig, IBDepthManager
 
 # Debug flag: Set to True to enable detailed debug logging
@@ -147,9 +147,31 @@ async def broadcast_status(connected: bool):
     state.set_connected(connected)
     await broadcast({"type": "status", "data": {"connected": connected, "symbol": state.symbol, "side": state.side}})
 async def broadcast_book(levels: list[AggregatedLevel], side: str):
-    # Keep field names aligned with your UI ({ levels, asks, side })
+    # (Deprecated single-side broadcaster retained for back-compat)
     data = [{"price": float(l.price), "sumShares": l.sumShares, "rank": l.rank} for l in levels]
     await broadcast({"type": "book", "data": {"levels": data, "asks": data, "side": side}})
+
+async def broadcast_book_full(
+    asks: list[AggregatedLevel], bids: list[AggregatedLevel],
+    best_ask, best_bid, last, volume
+):
+    tolist = lambda arr: [{"price": float(l.price), "sumShares": l.sumShares, "rank": l.rank} for l in arr]
+    stats = {
+        "bestBid": float(best_bid) if best_bid is not None else None,
+        "bestAsk": float(best_ask) if best_ask is not None else None,
+        "spread": (float(best_ask - best_bid) if (best_ask is not None and best_bid is not None) else None),
+        "last": (float(last) if last is not None else None),
+        "volume": int(volume) if volume is not None else None,
+    }
+    await broadcast({
+        "type": "book",
+        "data": {
+            "asks": tolist(asks),
+            "bids": tolist(bids),
+            "side": state.side,
+            "stats": stats
+        }
+    })
 async def broadcast_alert(a: AlertEvent):
     await broadcast({"type": "alert", "data": {
         "side": a.side, "symbol": a.symbol, "price": float(a.price),
@@ -168,12 +190,12 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
         if DEBUG:
             print("DEBUG: Symbol mismatch, discarding snapshot.")
         return
-    levels, alerts = aggregate_top10(state, asks, bids)
+    ask_book, bid_book, alerts, best_ask, best_bid = aggregate_both_top10(state, asks, bids)
     if DEBUG:
-        print(f"DEBUG: Aggregated book. Levels: {len(levels)}, Alerts: {len(alerts)}")
-    if levels:
-        if DEBUG:
-            print(f"DEBUG: Broadcasting book with {len(levels)} levels for side {state.side}")
-        await broadcast_book(levels, state.side)
+        print(f"DEBUG: Aggregated both books. Asks: {len(ask_book)}, Bids: {len(bid_book)}, Alerts: {len(alerts)}")
+    # Pull last/volume from IB manager
+    last, volume = manager.current_quote()
+    if ask_book or bid_book:
+        await broadcast_book_full(ask_book, bid_book, best_ask, best_bid, last, volume)
     for a in alerts:
         await broadcast_alert(a)

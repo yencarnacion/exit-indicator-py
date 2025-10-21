@@ -98,6 +98,32 @@ button.secondary { background: #203047; color: #dbe6f2; }
 .log-item { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 13px; color: var(--text); }
 .log-item.error { color: var(--danger); }
 
+/* --- Two-panel order book --- */
+.book-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.stat { background: #0e1522; border: 1px solid #1b2737; border-radius: 6px; padding: 8px 10px; }
+.stat-label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+.stat-val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+.book-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.book-panel {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  padding: 10px;
+  background: #0d1421;
+}
+.book-panel.bid { border-color: var(--good); }
+.book-panel.ask { border-color: var(--danger); }
+.book-panel .legend { margin-bottom: 8px; }
+
 /* Switch (Compact mode) */
 .switch { position: relative; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
 .switch .slider {
@@ -119,3 +145,5 @@ body.compact button { padding: 6px 10px; font-size: 13px; }
 body.compact .book th, body.compact .book td { padding: 4px 6px; font-size: 12px; }
 body.compact .col-rank { display: none; }
 body.compact .alerts .log { max-height: 180px; }
+body.compact .book-stats { gap: 6px; }
+body.compact .stat { padding: 6px 8px; }

@@ -7,11 +7,16 @@
     stop: document.getElementById('stopBtn'),
     sideAsk: document.getElementById('sideAsk'),
     sideBid: document.getElementById('sideBid'),
-    bookTitle: document.getElementById('bookTitle'),
     test: document.getElementById('testSoundBtn'),
-    bookBody: document.querySelector('#bookTable tbody'),
+    bookBidBody: document.querySelector('#bookTableBid tbody'),
+    bookAskBody: document.querySelector('#bookTableAsk tbody'),
     log: document.getElementById('alertLog'),
     compact: document.getElementById('compactToggle'),
+    bestBid: document.getElementById('bestBid'),
+    bestAsk: document.getElementById('bestAsk'),
+    spread: document.getElementById('spread'),
+    last: document.getElementById('lastPrice'),
+    vol: document.getElementById('dayVolume'),
   };
   let ws;
   let audio;
@@ -20,6 +25,7 @@
   let soundAvailable = false;
   let loadingTimer = null;
   let waitingForData = false;
+  let activeSymbol = '';
   function setStatus(connected, symbol) {
     els.status.textContent = connected ? (symbol ? `Live on ${symbol}` : 'Connected') : 'Disconnected';
     els.status.className = 'badge ' + (connected ? 'badge-live' : 'badge-disconnected');
@@ -31,11 +37,7 @@
   function currentSide() {
     return els.sideBid && els.sideBid.checked ? 'BID' : 'ASK';
   }
-  function setBookTitle(side) {
-    if (!els.bookTitle) return;
-    const label = side === 'BID' ? 'Bid' : 'Offer';
-    els.bookTitle.textContent = `Top‑10 ${label} Levels`;
-  }
+  function setBookTitle(_side) { /* no-op (title removed in new UI) */ }
   function formatShares(n) {
     if (!Number.isFinite(n)) return String(n);
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
@@ -53,7 +55,6 @@
       } else {
         if (els.sideAsk) els.sideAsk.checked = true; if (els.sideBid) els.sideBid.checked = false;
       }
-      setBookTitle(currentSide());
       soundURL = cfg.soundURL || '';
       soundAvailable = !!cfg.soundAvailable;
       if (soundAvailable && soundURL) {
@@ -66,8 +67,9 @@
     } catch (e) {
       console.warn('config failed', e);
     }
-    // Compact preference
-    const savedCompact = localStorage.getItem('ei.compact') === '1';
+    // Compact preference: default ON if unset
+    const saved = localStorage.getItem('ei.compact');
+    const savedCompact = (saved === null) ? true : (saved === '1');
     if (els.compact) {
       els.compact.checked = savedCompact;
     }
@@ -97,17 +99,20 @@
     beepFallback();
   }
   function showLoadingState() {
-    const tbody = els.bookBody;
-    tbody.innerHTML = '';
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 3;
-    td.style.textAlign = 'center';
-    td.style.padding = '2rem';
-    td.style.color = '#888';
-    td.textContent = 'Waiting for market data...';
-    tr.appendChild(td);
-    tbody.appendChild(tr);
+    const make = (tbody) => {
+      tbody.innerHTML = '';
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 3;
+      td.style.textAlign = 'center';
+      td.style.padding = '2rem';
+      td.style.color = '#888';
+      td.textContent = 'Waiting for market data...';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    };
+    make(els.bookBidBody);
+    make(els.bookAskBody);
   }
   function clearLoadingTimer() {
     if (loadingTimer) {
@@ -134,13 +139,20 @@
         const msg = JSON.parse(ev.data);
         if (msg.type === 'status') {
           setStatus(!!msg.data.connected, msg.data.symbol || '');
+          activeSymbol = msg.data.symbol || '';
           if (msg.data.side) {
             if (msg.data.side === 'BID') { if (els.sideBid) els.sideBid.checked = true; } else { if (els.sideAsk) els.sideAsk.checked = true; }
             setBookTitle(msg.data.side);
           }
         } else if (msg.type === 'book') {
           if (msg.data.side) setBookTitle(msg.data.side);
-          renderBook(msg.data.levels || msg.data.asks || []);
+          // New payload: both sides + stats
+          if (msg.data.asks && msg.data.bids) {
+            renderBooks(msg.data);
+          } else {
+            // Back-compat (single side)
+            renderSingleSide(msg.data.levels || msg.data.asks || []);
+          }
         } else if (msg.type === 'alert') {
           appendAlert(msg.data);
           pulseRowForAlert(msg.data);
@@ -157,15 +169,17 @@
     };
     ws.onclose = () => {
       setStatus(false, '');
+      activeSymbol = '';
       setTimeout(connectWS, 1000);
     };
   }
-  function renderBook(asks) {
+  // Back-compat renderer (single table)
+  function renderSingleSide(rows) {
     clearLoadingTimer();
-    const tbody = els.bookBody;
+    const tbody = els.bookAskBody; // render into ASK table by default
     const thr = Math.max(1, parseInt(els.thr.value || '0', 10) || 1);
     tbody.innerHTML = '';
-    asks.forEach(row => {
+    rows.forEach(row => {
       const tr = document.createElement('tr');
       tr.dataset.price = priceKey(row.price);
       const rankTd = document.createElement('td');
@@ -202,9 +216,74 @@
       tbody.appendChild(tr);
     });
   }
+  function renderBooks(data) {
+    clearLoadingTimer();
+    const thr = Math.max(1, parseInt(els.thr.value || '0', 10) || 1);
+    const makeSide = (tbody, rows, side) => {
+      tbody.innerHTML = '';
+      // Ensure exactly 10 rows rendered
+      for (let i = 0; i < 10; i++) {
+        const r = rows[i];
+        const tr = document.createElement('tr');
+        if (r) tr.dataset.price = priceKey(r.price);
+        const rankTd = document.createElement('td');
+        rankTd.className = 'col-rank';
+        rankTd.textContent = r ? r.rank : '';
+        const priceTd = document.createElement('td');
+        priceTd.className = 'col-price';
+        if (r) {
+          const priceNum = (typeof r.price === 'string') ? parseFloat(r.price) : r.price;
+          priceTd.textContent = Number.isFinite(priceNum) ? priceNum.toFixed(2) : String(r.price);
+        } else {
+          priceTd.textContent = '';
+        }
+        const sizeTd = document.createElement('td');
+        sizeTd.className = 'col-size';
+        const meter = document.createElement('div'); meter.className = 'meter';
+        const fill = document.createElement('div'); fill.className = 'fill';
+        const label = document.createElement('span'); label.className = 'label';
+        if (r) {
+          const size = r.sumShares || 0;
+          const ratio = size / thr;
+          const width = Math.min(1, ratio) * 100;
+          if (ratio >= 2) fill.classList.add('danger');
+          else if (ratio >= 1.5) fill.classList.add('hot');
+          else if (ratio >= 1.0) fill.classList.add('warn');
+          fill.style.width = width.toFixed(2) + '%';
+          const ratioTxt = ratio.toFixed(2) + '×';
+          label.textContent = `${formatShares(size)} ${ratioTxt}`;
+          if (r.rank === 0) tr.classList.add('best');
+          if (ratio >= 1.0) tr.classList.add('over');
+        } else {
+          fill.style.width = '0%';
+          label.textContent = '';
+        }
+        meter.appendChild(fill); meter.appendChild(label);
+        sizeTd.appendChild(meter);
+        tr.append(rankTd, priceTd, sizeTd);
+        tbody.appendChild(tr);
+      }
+    };
+    makeSide(els.bookBidBody, data.bids || [], 'BID');
+    makeSide(els.bookAskBody, data.asks || [], 'ASK');
+    if (data.stats) updateStats(data.stats);
+  }
+  function updateStats(s) {
+    const fmtP = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
+    const fmtV = (x) => (Number.isFinite(+x) ? Number(x).toLocaleString() : '—');
+    const bb = (s.bestBid != null) ? +s.bestBid : null;
+    const ba = (s.bestAsk != null) ? +s.bestAsk : null;
+    const sp = (bb != null && ba != null) ? (ba - bb) : null;
+    if (els.bestBid) els.bestBid.textContent = fmtP(bb);
+    if (els.bestAsk) els.bestAsk.textContent = fmtP(ba);
+    if (els.spread)  els.spread.textContent  = fmtP(sp);
+    if (els.last)    els.last.textContent    = fmtP(s.last);
+    if (els.vol)     els.vol.textContent     = fmtV(s.volume);
+  }
   function pulseRowForAlert(a) {
     const key = priceKey(a.price);
-    const row = els.bookBody.querySelector(`tr[data-price="${key}"]`);
+    const tbody = (a.side === 'BID') ? els.bookBidBody : els.bookAskBody;
+    const row = tbody.querySelector(`tr[data-price="${key}"]`);
     if (row) {
       row.classList.add('pulse', 'over');
       const priceCell = row.querySelector('.col-price');
@@ -247,6 +326,10 @@
     } else {
       // Start loading timer - show loading state if no data after 5s
       startLoadingTimer();
+      try {
+        const out = await res.json();
+        activeSymbol = out.symbol || symbol;
+      } catch {}
     }
   }
   async function stop() {
@@ -259,6 +342,7 @@
         appendError(`Stop failed: ${txt}`);
       }
     }
+    activeSymbol = '';
   }
   async function updateThreshold() {
     const threshold = Math.max(1, parseInt(els.thr.value || '0', 10) || 1);
@@ -306,6 +390,14 @@
       localStorage.setItem('ei.compact', els.compact.checked ? '1' : '0');
     });
   }
+  // Warn if navigating away while subscribed
+  window.addEventListener('beforeunload', (e) => {
+    if (activeSymbol) {
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
+    }
+  });
   // Boot
   initConfig().then(connectWS);
 })();

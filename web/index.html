@@ -28,12 +28,12 @@
         <label>Side</label>
         <div class="radio-group" id="sideGroup">
           <label class="radio">
-            <input type="radio" name="side" id="sideAsk" value="ASK" checked />
-            <span>Offer</span>
-          </label>
-          <label class="radio">
             <input type="radio" name="side" id="sideBid" value="BID" />
             <span>Bid</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="side" id="sideAsk" value="ASK" checked />
+            <span>Ask</span>
           </label>
         </div>
       </div>
@@ -48,25 +48,55 @@
       </div>
     </section>
     <section class="book">
-      <div class="section-header">
-        <h2 id="bookTitle">Top‑10 Offer Levels</h2>
-        <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
-          <span class="chip chip-neutral">&lt;1×</span>
-          <span class="chip chip-warn">1.0–1.5×</span>
-          <span class="chip chip-hot">1.5–2.0×</span>
-          <span class="chip chip-danger">≥2×</span>
+      <!-- Summary stats row -->
+      <div class="book-stats" id="bookStats">
+        <div class="stat"><span class="stat-label">Best Bid</span><span class="stat-val" id="bestBid">—</span></div>
+        <div class="stat"><span class="stat-label">Best Ask</span><span class="stat-val" id="bestAsk">—</span></div>
+        <div class="stat"><span class="stat-label">Spread</span><span class="stat-val" id="spread">—</span></div>
+        <div class="stat"><span class="stat-label">Last</span><span class="stat-val" id="lastPrice">—</span></div>
+        <div class="stat"><span class="stat-label">Volume</span><span class="stat-val" id="dayVolume">—</span></div>
+      </div>
+
+      <div class="book-panels">
+        <!-- BID panel (left) -->
+        <div class="book-panel bid">
+          <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
+            <span class="chip chip-neutral">&lt;1×</span>
+            <span class="chip chip-warn">1.0–1.5×</span>
+            <span class="chip chip-hot">1.5–2.0×</span>
+            <span class="chip chip-danger">≥2×</span>
+          </div>
+          <table id="bookTableBid">
+            <thead>
+              <tr>
+                <th class="col-rank">#</th>
+                <th class="col-price">Price</th>
+                <th class="col-size">Agg. Size</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <!-- ASK panel (right) -->
+        <div class="book-panel ask">
+          <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
+            <span class="chip chip-neutral">&lt;1×</span>
+            <span class="chip chip-warn">1.0–1.5×</span>
+            <span class="chip chip-hot">1.5–2.0×</span>
+            <span class="chip chip-danger">≥2×</span>
+          </div>
+          <table id="bookTableAsk">
+            <thead>
+              <tr>
+                <th class="col-rank">#</th>
+                <th class="col-price">Price</th>
+                <th class="col-size">Agg. Size</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
         </div>
       </div>
-      <table id="bookTable">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th class="col-price">Price</th>
-            <th class="col-size">Agg. Size</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
     </section>
     <section class="alerts">
       <h2>Alert Log</h2>

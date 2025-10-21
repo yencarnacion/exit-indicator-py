@@ -33,6 +33,7 @@ class IBDepthManager:
         self.ib = IB()
         self._symbol: str = ""
         self._ticker: Optional[Ticker] = None
+        self._quote_ticker: Optional[Ticker] = None
         self._contract: Optional[Contract] = None
         self._on_status = on_status
         self._on_snapshot = on_snapshot
@@ -40,6 +41,8 @@ class IBDepthManager:
         self._stop = asyncio.Event()
         self._throttle_ms = 50
         self._last_emit_ms = 0
+        self._last_price: Optional[float] = None
+        self._day_volume: Optional[int] = None
 
     async def run(self):
         backoff = 1.0
@@ -64,7 +67,19 @@ class IBDepthManager:
                 self.ib.cancelMktDepth(self._contract)
             except Exception:
                 pass
+        # Cancel mkt data
+        if self._quote_ticker and self._contract:
+            try:
+                self.ib.cancelMktData(self._contract)
+            except Exception:
+                pass
         self._ticker = None
+        try:
+            if self._quote_ticker:
+                self._quote_ticker.updateEvent -= self._on_quote_update
+        except Exception:
+            pass
+        self._quote_ticker = None
         self._contract = None
         self._symbol = ""
         # Disconnect from IB
@@ -134,6 +149,14 @@ class IBDepthManager:
                 pass
         self._ticker = None
         self._contract = None
+        # Cancel quote stream
+        try:
+            if self._quote_ticker:
+                self._quote_ticker.updateEvent -= self._on_quote_update
+        except Exception:
+            pass
+        self._quote_ticker = None
+        self._last_price, self._day_volume = None, None
 
     async def _subscribe_symbol(self, symbol: str):
         try:
@@ -148,7 +171,17 @@ class IBDepthManager:
                     self.ib.cancelMktDepth(self._contract)
                 except Exception:
                     pass
+            if self._quote_ticker and self._contract:
+                try:
+                    self.ib.cancelMktData(self._contract)
+                except Exception:
+                    pass
+                try:
+                    self._quote_ticker.updateEvent -= self._on_quote_update
+                except Exception:
+                    pass
             self._ticker = None
+            self._quote_ticker = None
             self._contract = None
 
             if DEBUG:
@@ -178,6 +211,18 @@ class IBDepthManager:
             except Exception:
                 pass
             self._ticker.updateEvent += self._on_ticker_update
+
+            # Also subscribe to top-of-book/last/volume
+            try:
+                self._quote_ticker = self.ib.reqMktData(contract, "", False, False)
+                try:
+                    self._quote_ticker.updateEvent -= self._on_quote_update
+                except Exception:
+                    pass
+                self._quote_ticker.updateEvent += self._on_quote_update
+            except Exception as e:
+                if DEBUG:
+                    print(f"ERROR requesting market data for {symbol}: {e}")
         except Exception as e:
             if DEBUG:
                 print(f"ERROR during _subscribe_symbol for {symbol}: {e}")
@@ -327,6 +372,25 @@ class IBDepthManager:
             if DEBUG:
                 print(f"ERROR in _on_pending_tickers calling _on_snapshot: {e}")
             self._on_error(f"snapshot emit: {e}")
+
+    def _on_quote_update(self, ticker: Ticker, *_):
+        if ticker is not self._quote_ticker:
+            return
+        try:
+            lp = getattr(ticker, "last", None)
+            if lp is not None:
+                self._last_price = float(lp)
+        except Exception:
+            pass
+        try:
+            vol = getattr(ticker, "volume", None)
+            if vol is not None:
+                self._day_volume = int(vol)
+        except Exception:
+            pass
+
+    def current_quote(self) -> Tuple[Optional[float], Optional[int]]:
+        return self._last_price, self._day_volume
 
     @staticmethod
     def _convert_dom(rows: List[DOMLevel], side: str) -> List[DepthLevel]:
