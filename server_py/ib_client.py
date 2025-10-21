@@ -133,28 +133,46 @@ class IBDepthManager:
 
     async def unsubscribe(self):
         """
-        Cancel current market depth subscription and clear symbol.
-        Only cancels if a subscription is active to avoid Error 318.
+        Cancel current market depth and quote subscriptions and clear symbol.
         """
         self._symbol = ""
+        
+        # 1. Detach event handlers first
         if self._ticker:
             try:
                 self._ticker.updateEvent -= self._on_ticker_update
             except Exception:
                 pass
-        if self._ticker and self._contract:
+        if self._quote_ticker:
             try:
-                self.ib.cancelMktDepth(self._contract)
+                self._quote_ticker.updateEvent -= self._on_quote_update
             except Exception:
                 pass
+        
+        # 2. Cancel IB subscriptions *if* we have a contract
+        #    Both subscriptions share the same contract object.
+        if self._contract:
+            # Cancel depth
+            if self._ticker:
+                try:
+                    self.ib.cancelMktDepth(self._contract)
+                except Exception as e:
+                    if DEBUG: print(f"DEBUG: Error on cancelMktDepth: {e}")
+                    pass  # Ignore 310 or other errors on stop
+            
+            # --- THIS IS THE FIX ---
+            # Added missing cancellation for the quote (reqMktData) ticker
+            if self._quote_ticker:
+                try:
+                    self.ib.cancelMktData(self._contract)
+                except Exception as e:
+                    if DEBUG: print(f"DEBUG: Error on cancelMktData: {e}")
+                    pass # Ignore errors on stop
+            # --- End Fix ---
+
+        # 3. Clear all local state
         self._ticker = None
         self._contract = None
-        # Cancel quote stream
-        try:
-            if self._quote_ticker:
-                self._quote_ticker.updateEvent -= self._on_quote_update
-        except Exception:
-            pass
         self._quote_ticker = None
         self._last_price, self._day_volume = None, None
 
