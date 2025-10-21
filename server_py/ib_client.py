@@ -95,59 +95,56 @@ class IBDepthManager:
             await self._subscribe_symbol(self._symbol)
 
     async def subscribe_symbol(self, symbol: str):
-        sym = symbol.strip().upper()
-        log_debug(f"subscribe_symbol() called for '{sym}'. Current symbol: '{self._symbol}'.")
-        if not sym:
-            await self.unsubscribe()
-            return
-
-        if sym == self._symbol and self._ticker and self._contract:
-            log_debug(f"Already subscribed to '{sym}', skipping.")
-            return
-
-        self._symbol = sym
+        log_debug(f"subscribe_symbol() called for '{symbol}'. Current symbol: '{self._symbol}'.")
         if not self.ib.isConnected():
-            log_debug("Not connected to IB, subscription will be deferred until connection is established.")
+            # If not connected, just set the symbol. The run loop will subscribe on connect.
+            self._symbol = symbol.strip().upper()
             return
-        
-        await self._subscribe_symbol(self._symbol)
+        await self._subscribe_symbol(symbol)
 
     async def unsubscribe(self):
+        """
+        Cancel current market depth and quote subscriptions and clear symbol.
+        """
         log_debug(f"unsubscribe() called. Current symbol: '{self._symbol}'")
-        log_debug(f"  State before unsubscribe: contract={self._contract}, ticker is {'set' if self._ticker else 'None'}, quote_ticker is {'set' if self._quote_ticker else 'None'}")
 
-        self._symbol = "" # Clear symbol immediately
-
-        # 1. Detach event handlers
+        # 1. Detach event handlers first
         if self._ticker:
-            try: self._ticker.updateEvent.clear()
-            except Exception as e: log_debug(f"Error clearing ticker updateEvent: {e}")
+            try:
+                self._ticker.updateEvent -= self._on_ticker_update
+            except Exception:
+                pass
         if self._quote_ticker:
-            try: self._quote_ticker.updateEvent.clear()
-            except Exception as e: log_debug(f"Error clearing quote_ticker updateEvent: {e}")
-        
-        # 2. Cancel IB subscriptions if we have a contract
+            try:
+                self._quote_ticker.updateEvent -= self._on_quote_update
+            except Exception:
+                pass
+
+        # 2. Cancel IB subscriptions if a contract exists.
+        #    Both subscriptions share the same contract object.
         if self._contract:
+            # Create a local copy, as state will be cleared
             contract_to_cancel = self._contract
-            log_debug(f"Have a contract to cancel: conId={contract_to_cancel.conId}")
-            
+            # Cancel depth
             if self._ticker:
                 try:
                     log_debug(f"Attempting to cancel MktDepth for conId={contract_to_cancel.conId}")
                     self.ib.cancelMktDepth(contract_to_cancel)
                 except Exception as e:
-                    log_debug(f"Error on cancelMktDepth: {e}")
+                    log_debug(f"Non-fatal error on cancelMktDepth: {e}")
 
+            # Cancel quote
             if self._quote_ticker:
                 try:
                     log_debug(f"Attempting to cancel MktData for conId={contract_to_cancel.conId}")
                     self.ib.cancelMktData(contract_to_cancel)
                 except Exception as e:
-                    log_debug(f"Error on cancelMktData: {e}")
+                    log_debug(f"Non-fatal error on cancelMktData: {e}")
         else:
             log_debug("No contract found, nothing to cancel on IB side.")
 
         # 3. Clear all local state
+        self._symbol = ""
         self._ticker = None
         self._contract = None
         self._quote_ticker = None
@@ -156,19 +153,18 @@ class IBDepthManager:
 
 
     async def _subscribe_symbol(self, symbol: str):
-        log_debug(f"_subscribe_symbol (internal) starting for '{symbol}'.")
+        await self.unsubscribe()
+        sym = symbol.strip().upper()
+        if not sym:
+            log_debug("Symbol is empty, ensuring stopped.")
+            return
+        self._symbol = sym
+        log_debug(f"_subscribe_symbol (internal) starting for '{self._symbol}'.")
         try:
-            # Cancel previous subscriptions first
-            if self._ticker or self._quote_ticker or self._contract:
-                await self.unsubscribe()
-            
-            # Restore the symbol since unsubscribe clears it
-            self._symbol = symbol
-            log_debug(f"Symbol restored to '{self._symbol}' after clearing previous subscription.")
-
+            log_debug(f"Qualifying contract: Stock(symbol='{self._symbol}', exchange='SMART', currency='USD')")
+            # SMART when aggregating; single venue fallback otherwise
             venue = "SMART" if self.cfg.smart_depth else "ISLAND"
-            contract = Stock(symbol, venue, "USD")
-            log_debug(f"Qualifying contract: {contract}")
+            contract = Stock(self._symbol, venue, "USD")
             (qualified_contract,) = await self.ib.qualifyContractsAsync(contract)
             self._contract = qualified_contract
             log_debug(f"Contract QUALIFIED: conId={self._contract.conId}, symbol={self._contract.symbol}, exchange={self._contract.exchange}")
