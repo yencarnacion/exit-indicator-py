@@ -179,7 +179,7 @@
   function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onopen = () => {};
+    ws.onopen = () => { try { TS_AUDIO.engine && TS_AUDIO.engine.resume(); } catch {} };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
@@ -397,7 +397,7 @@
     const priceStr = fmt2(ev.price);
     row.innerHTML = `
       <div class="left">
-        <span class="badge ${colorClass}">${ev.side.replace('_',' ')}</span>
+        <span class="badge ${colorClass}">${ev.side.replaceAll('_',' ')}</span>
         <span class="price ${colorClass}">${priceStr}</span>
         <span class="amt">$${ev.amountStr || ''}</span>
       </div>
@@ -451,6 +451,8 @@
       els.sym.focus();
       return;
     }
+    // Nudge audio context past autoplay restrictions on an explicit click
+    try { TS_AUDIO.engine && (await TS_AUDIO.engine.resume()); } catch {}
     const threshold = parseInt(els.thr.value || '0', 10);
     // Dollar combobox stores a JSON blob or a numeric threshold; accept both
     let dollar = 0, bigDollar = 0;

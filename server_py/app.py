@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import time as _time
 import json
 import os
 from pathlib import Path
@@ -29,9 +30,14 @@ def _is_true(x) -> bool:
 TNS_DEBUG = _is_true(os.getenv("EI_TNS_DEBUG", "")) or _is_true(os.getenv("EI_DEBUG", "")) \
             or (str(getattr(cfg, "log_level", "")).lower() == "debug")
 def tns_log(msg: str):
-    if TNS_DEBUG:
-        # simple timestamp to correlate across files
-        print(f"[TNS {asyncio.get_event_loop().time():.3f}] {msg}", flush=True)
+    """Thread-safe debug logger that works in both the main loop and AnyIO worker threads."""
+    if not TNS_DEBUG:
+        return
+    try:
+        ts = asyncio.get_running_loop().time()   # fast, monotonic, event-loop time
+    except RuntimeError:
+        ts = _time.perf_counter()                # fallback in threadpool
+    print(f"[TNS {ts:.3f}] {msg}", flush=True)
 
 # --- state & wiring ---
 state = State(cooldown_seconds=cfg.cooldown_seconds, default_threshold=cfg.default_threshold_shares)
@@ -71,12 +77,18 @@ def _css():
     return FileResponse(WEB_DIR / "styles.css")
 @app.get("/sounds/{filename}", include_in_schema=False)
 def _sound(filename: str):
-    # strong caching is handled by the UI with ?v=hash
     path = WEB_DIR / "sounds" / filename
     if not path.exists():
         return PlainTextResponse("not found", status_code=404)
+    ext = path.suffix.lower()
+    if ext in (".wav", ".wave"):
+        media = "audio/wav"
+    elif ext in (".mp3", ".mpeg"):
+        media = "audio/mpeg"
+    else:
+        media = "application/octet-stream"
     headers = {"Cache-Control": "public, max-age=31536000, immutable"}
-    return FileResponse(path, headers=headers, media_type="audio/mpeg")
+    return FileResponse(path, headers=headers, media_type=media)
 
 # Service worker for sound caching (cache-first on /sounds/*)
 @app.get("/sw.js", include_in_schema=False)
