@@ -21,6 +21,18 @@ DEBUG = False
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "./config.tws.yaml")
 cfg = Config.load(CONFIG_PATH)
 app = FastAPI()
+
+# --- T&S focused debug switch (env or config) ---
+def _is_true(x) -> bool:
+    s = str(x).strip().lower()
+    return s in ("1", "true", "yes", "on", "debug")
+TNS_DEBUG = _is_true(os.getenv("EI_TNS_DEBUG", "")) or _is_true(os.getenv("EI_DEBUG", "")) \
+            or (str(getattr(cfg, "log_level", "")).lower() == "debug")
+def tns_log(msg: str):
+    if TNS_DEBUG:
+        # simple timestamp to correlate across files
+        print(f"[TNS {asyncio.get_event_loop().time():.3f}] {msg}", flush=True)
+
 # --- state & wiring ---
 state = State(cooldown_seconds=cfg.cooldown_seconds, default_threshold=cfg.default_threshold_shares)
 ws_clients: Set[WebSocket] = set()
@@ -183,6 +195,7 @@ def api_health():
     return {"ok": True, "connected": state.connected}
 @app.get("/api/config")
 def api_config():
+    tns_log("GET /api/config")
     return {
         "defaultThresholdShares": cfg.default_threshold_shares,
         "currentThresholdShares": state.threshold,
@@ -210,12 +223,16 @@ async def api_start(req: StartReq):
     state.set_tape_thresholds(req.dollar, req.bigDollar)
     if req.silent is not None:
         state.set_silent(req.silent)
+    tns_log(f"POST /api/start sym={state.symbol} side={state.side} "
+            f"thrShares={state.threshold} $thr={state.dollar_threshold} $big={state.big_dollar_threshold} "
+            f"silent={state.silent}")
     # Allow starts even if not yet connected, to match dev affordance
     await manager.subscribe_symbol(sym)
     await broadcast_status(state.connected)
     return {"ok": True, "symbol": state.symbol, "threshold": state.threshold, "side": state.side}
 @app.post("/api/stop")
 async def api_stop():
+    tns_log("POST /api/stop")
     state.set_symbol("")
     await manager.unsubscribe()
     await broadcast_status(state.connected)
@@ -225,15 +242,18 @@ async def api_threshold(req: ThresholdReq):
     if req.threshold < 1:
         return PlainTextResponse("threshold must be >=1", status_code=400)
     state.set_threshold(req.threshold)
+    tns_log(f"POST /api/threshold => {state.threshold}")
     return {"ok": True, "threshold": state.threshold}
 @app.post("/api/side")
 async def api_side(req: SideReq):
     s = state.set_side(req.side)
+    tns_log(f"POST /api/side => {s}")
     return {"ok": True, "side": s}
 
 @app.post("/api/silent")
 async def api_silent(req: SilentReq):
     state.set_silent(req.silent)
+    tns_log(f"POST /api/silent => {state.silent}")
     return {"ok": True, "silent": state.silent}
 # --- WebSocket ---
 @app.websocket("/ws")
@@ -257,6 +277,13 @@ async def send_json(ws: WebSocket, payload: Dict):
 async def broadcast(payload: Dict):
     stale = []
     async with ws_lock:
+        if TNS_DEBUG:
+            try:
+                _t = payload.get("type", "")
+                if _t in ("trade", "quote"):
+                    tns_log(f"broadcast {_t} -> {len(ws_clients)} client(s)")
+            except Exception:
+                pass
         for ws in ws_clients:
             try:
                 await ws.send_text(json.dumps(payload, separators=(",", ":")))
@@ -361,6 +388,7 @@ async def broadcast_quote(bid: float | None, ask: float | None):
     global _last_bid, _last_ask
     if bid is not None: _last_bid = bid
     if ask is not None: _last_ask = ask
+    tns_log(f"QUOTE bid={bid} ask={ask} (last_bid={_last_bid} last_ask={_last_ask})")
     await broadcast({"type": "quote", "bid": bid, "ask": ask, "timeISO": None})
 
 async def broadcast_trade(ev: dict):
@@ -371,11 +399,16 @@ async def broadcast_trade(ev: dict):
     amount = price * size
     # Threshold filter (T&S only)
     if state.dollar_threshold and amount < state.dollar_threshold:
+        tns_log(f"DROP trade (below $ threshold): sym={sym} px={price:.4f} sz={size} "
+                f"amt={amount:.2f} < $thr={state.dollar_threshold}")
         return
     # Classify vs last seen bid/ask
     side, color = _classify_trade(price, _last_bid, _last_ask)
     big = bool(state.big_dollar_threshold and amount >= state.big_dollar_threshold)
     amountStr, _ = _fmt_amount(amount)
+    tns_log(f"EMIT trade: sym={sym} px={price:.4f} sz={size} amt={amount:.2f} "
+            f"bid={_last_bid} ask={_last_ask} side={side} big={big} "
+            f"$thr={state.dollar_threshold} $big={state.big_dollar_threshold}")
     payload = {
         "type": "trade",
         "sym": sym, "price": price, "size": size,

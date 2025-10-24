@@ -4,12 +4,14 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Optional, Tuple, List
+import os
 from ib_async import IB, Stock, util, Contract, Ticker, DOMLevel
 from ib_async.objects import TickByTickAllLast, TickByTickBidAsk
 from .depth import DepthLevel
 
-# --- SET TO TRUE TO ENABLE VERBOSE LOGGING ---
-DEBUG = False
+# --- Verbose logging (enable via EI_TNS_DEBUG=1 or EI_DEBUG=1) ---
+DEBUG = (os.getenv("EI_TNS_DEBUG", "").strip().lower() in ("1","true","yes","on","debug") or
+         os.getenv("EI_DEBUG", "").strip().lower() in ("1","true","yes","on","debug"))
 
 def log_debug(msg: str):
     """Helper for timestamped debug logging."""
@@ -108,6 +110,8 @@ class IBDepthManager:
             self._symbol = sym
             if self.ib.isConnected():
                 await self._subscribe_symbol(self._symbol)
+            else:
+                log_debug("IB not connected yet; symbol staged for subscribe after connect.")
 
     async def unsubscribe(self):
         log_debug(f"unsubscribe() called. Cleaning up '{self._symbol}'.")
@@ -190,6 +194,7 @@ class IBDepthManager:
             self._tbt_trades_id = self.ib.reqTickByTickData(
                 self._contract, "AllLast", numberOfTicks=0, ignoreSize=False
             )
+            log_debug(f"TBT subscriptions set: BidAsk id={self._tbt_bidask_id}, AllLast id={self._tbt_trades_id}")
             # consume via pendingTickersEvent; start from current end of list
             self._tbt_index = 0
 
@@ -207,8 +212,16 @@ class IBDepthManager:
     def _on_pending_tickers(self, tickers: List[Ticker]):
         """This is the primary event handler for processing all market data updates."""
         now_ms = time.time() * 1000.0
+        if DEBUG:
+            try:
+                log_debug(f"pendingTickers: {len(tickers)} items; sym='{self._symbol or ''}'")
+            except Exception:
+                pass
         # Check for quote updates first (keeps last/volume fresh for stats)
         if self._quote_ticker and self._quote_ticker in tickers:
+            if DEBUG:
+                n = len(self._quote_ticker.tickByTicks or [])
+                log_debug(f"quote_ticker in batch; tickByTicks={n}")
             self._on_quote_update(self._quote_ticker, True)  # Force update
             # Also consume tick-by-tick data from this ticker
             self._consume_tick_by_tick(self._quote_ticker)
@@ -216,6 +229,8 @@ class IBDepthManager:
         # Check for depth updates, with throttling
         if self._ticker and self._ticker in tickers:
             if now_ms - self._last_emit_ms < self._throttle_ms:
+                if DEBUG:
+                    log_debug("depth update throttled")
                 return  # Throttle depth updates
             self._last_emit_ms = now_ms
             
@@ -223,6 +238,8 @@ class IBDepthManager:
                 log_debug(f"Processing DOM for {self._symbol} via pendingTickersEvent")
                 asks = self._convert_dom(self._ticker.domAsks, "ASK")
                 bids = self._convert_dom(self._ticker.domBids, "BID")
+                if DEBUG:
+                    log_debug(f"DOM sizes: asks={len(asks)} bids={len(bids)}")
                 self._on_snapshot(self._symbol, asks, bids)
                 # Depth ticker may also receive tick-by-tick updates (defensive)
                 self._consume_tick_by_tick(self._ticker)
@@ -236,6 +253,8 @@ class IBDepthManager:
 
             vol = getattr(ticker, "volume", None)
             if vol is not None and not util.isNan(vol): self._day_volume = int(vol)
+            if DEBUG:
+                log_debug(f"quote update: last={self._last_price} volume={self._day_volume}")
 
     def current_quote(self) -> Tuple[Optional[float], Optional[int]]:
         return self._last_price, self._day_volume
@@ -264,14 +283,19 @@ class IBDepthManager:
         if start >= n:
             return
         # Consume [start, n)
+        log_debug(f"TBT consume: start={start} n={n} sym='{self._symbol}'")
         for i in range(start, n):
             t = items[i]
             try:
                 if isinstance(t, TickByTickBidAsk):
                     bid = float(t.bidPrice) if t.bidPrice is not None else None
                     ask = float(t.askPrice) if t.askPrice is not None else None
+                    if DEBUG:
+                        log_debug(f"TBT BidAsk i={i}: bid={bid} ask={ask}")
                     self._on_tape_quote(bid, ask)
                 elif isinstance(t, TickByTickAllLast):
+                    if DEBUG:
+                        log_debug(f"TBT AllLast i={i}: price={float(t.price)} size={int(t.size)}")
                     ev = {
                         "sym": self._symbol,
                         "price": float(t.price),
@@ -284,4 +308,5 @@ class IBDepthManager:
             except Exception as e:
                 log_debug(f"_consume_tick_by_tick item error: {e}")
         self._tbt_index = n
+        log_debug(f"TBT consume done; consumed={n-start}, new_index={self._tbt_index}")
 
