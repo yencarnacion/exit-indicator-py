@@ -55,9 +55,9 @@ class IBDepthManager:
         self._last_emit_ms = 0
         self._last_price: Optional[float] = None
         self._day_volume: Optional[int] = None
-        # tick-by-tick subscription handles (ib_async returns an object to cancel with)
-        self._tbt_bidask_id: Optional[int] = None
-        self._tbt_trades_id: Optional[int] = None
+        # tick-by-tick subscription state
+        self._tbt_task: Optional[asyncio.Task] = None
+        self._tbt_index: int = 0  # per-subscription index for quote_ticker.tickByTicks
         log_debug("IBDepthManager initialized.")
 
     async def run(self):
@@ -92,10 +92,8 @@ class IBDepthManager:
 
         self.ib.pendingTickersEvent.clear();   self.ib.pendingTickersEvent   += self._on_pending_tickers
         self.ib.errorEvent.clear();            self.ib.errorEvent            += self._on_ib_error
-        # --- T&S: dedicated event streams (robust; do not rely on tickByTicks draining) ---
-        self.ib.tickByTickBidAskEvent.clear();   self.ib.tickByTickBidAskEvent   += self._on_tbt_bidask
-        self.ib.tickByTickAllLastEvent.clear();  self.ib.tickByTickAllLastEvent  += self._on_tbt_alllast
-        log_debug("Event handlers attached.")
+        # T&S is handled by the pump task; do not bind global tickByTick* events (avoids duplicates).
+        log_debug("Event handlers attached (DOM + error).")
 
         if self._symbol:
             log_debug(f"Re-subscribing to '{self._symbol}' after reconnect.")
@@ -117,6 +115,16 @@ class IBDepthManager:
 
     async def unsubscribe(self):
         log_debug(f"unsubscribe() called. Cleaning up '{self._symbol}'.")
+        
+        # stop the pump task
+        if self._tbt_task:
+            try:
+                self._tbt_task.cancel()
+                await asyncio.sleep(0)  # let it cancel
+            except Exception:
+                pass
+            self._tbt_task = None
+        self._tbt_index = 0
         
         contract_to_cancel = self._contract
         ticker_to_cancel = self._ticker
@@ -145,19 +153,16 @@ class IBDepthManager:
             try: self.ib.cancelMktData(contract_to_cancel)
             except Exception as e: log_debug(f"Non-fatal error on cancelMktData: {e}")
             # tick-by-tick cancelations
-            bidask_id, trades_id = self._tbt_bidask_id, self._tbt_trades_id
             try:
-                if bidask_id is not None:
-                    self.ib.cancelTickByTickData(bidask_id)
+                if contract_to_cancel:
+                    self.ib.cancelTickByTickData(contract_to_cancel, "BidAsk")
             except Exception as e:
                 log_debug(f"Non-fatal cancelTickByTickData(BidAsk): {e}")
             try:
-                if trades_id is not None:
-                    self.ib.cancelTickByTickData(trades_id)
+                if contract_to_cancel:
+                    self.ib.cancelTickByTickData(contract_to_cancel, "AllLast")
             except Exception as e:
                 log_debug(f"Non-fatal cancelTickByTickData(AllLast): {e}")
-            self._tbt_bidask_id = None
-            self._tbt_trades_id = None
 
             log_debug("Pausing for 0.5s to allow Gateway to process cancellations...")
             await asyncio.sleep(0.5)
@@ -191,15 +196,20 @@ class IBDepthManager:
 
             # --- Tick-by-tick subscriptions ---
             # BidAsk for live NBBO-like reference
-            self._tbt_bidask_id = self.ib.reqTickByTickData(
+            self.ib.reqTickByTickData(
                 self._contract, "BidAsk", numberOfTicks=0, ignoreSize=False
             )
             # AllLast for prints (includes odd-lots & UTP where available)
-            self._tbt_trades_id = self.ib.reqTickByTickData(
+            self.ib.reqTickByTickData(
                 self._contract, "AllLast", numberOfTicks=0, ignoreSize=False
             )
-            log_debug(f"TBT subscriptions set: BidAsk id={self._tbt_bidask_id}, AllLast id={self._tbt_trades_id}")
-            # Event-driven: no draining of tickByTicks
+            log_debug(f"TBT subscriptions set for {self._symbol}")
+            # Start the pump task to drain tickByTicks
+            self._tbt_index = len(self._quote_ticker.tickByTicks or [])
+            if self._tbt_task:
+                try: self._tbt_task.cancel()
+                except: pass
+            self._tbt_task = asyncio.create_task(self._pump_tbt())
 
         except Exception as e:
             log_debug(f"CRITICAL ERROR during _subscribe_symbol for '{symbol}': {e}")
@@ -226,7 +236,7 @@ class IBDepthManager:
                 n = len(self._quote_ticker.tickByTicks or [])
                 log_debug(f"quote_ticker in batch; tickByTicks={n}")
             self._on_quote_update(self._quote_ticker, True)  # Force update
-            # T&S is handled by tickByTick* events; do not drain tickByTicks here.
+            # T&S is pump-driven; do not drain tickByTicks here.
 
         # Check for depth updates, with throttling
         if self._ticker and self._ticker in tickers:
@@ -271,38 +281,52 @@ class IBDepthManager:
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
         return out
 
-    # --- T&S: ib_async v2.x event handlers ---
-    def _on_tbt_bidask(self, ticker: Ticker, t: TickByTickBidAsk):
-        """Called by ib.tickByTickBidAskEvent; keeps NBBO-ish refs fresh for side classification."""
-        if not self._contract or not ticker or not ticker.contract or ticker.contract.conId != self._contract.conId:
-            return
+    # --- T&S: TBT pump task ---
+    async def _pump_tbt(self):
+        """Continuously drain tickByTicks from the quote ticker without relying on pendingTickers batches."""
+        log_debug("TBT pump started.")
         try:
-            bid = float(t.bidPrice) if t.bidPrice is not None and not util.isNan(t.bidPrice) else None
-            ask = float(t.askPrice) if t.askPrice is not None and not util.isNan(t.askPrice) else None
-            if DEBUG:
-                log_debug(f"TBT BidAsk Event: bid={bid} ask={ask}")
-            self._on_tape_quote(bid, ask)
+            while self._symbol and self._quote_ticker and self._contract and not self._stop_event.is_set():
+                items = self._quote_ticker.tickByTicks or []
+                n = len(items)
+                start = self._tbt_index
+                # If IB resets/rotates the internal list, fast-forward to avoid replays.
+                if n < start:
+                    if DEBUG:
+                        log_debug(f"TBT pump: list shrank (n={n} < start={start}); fast-forwarding index.")
+                    self._tbt_index = n
+                    start = n
+                if start < n:
+                    if DEBUG:
+                        log_debug(f"TBT pump: consuming {n-start} items (start={start}, n={n})")
+                    for i in range(start, n):
+                        t = items[i]
+                        try:
+                            if isinstance(t, TickByTickBidAsk):
+                                bid = float(t.bidPrice) if t.bidPrice is not None and not util.isNan(t.bidPrice) else None
+                                ask = float(t.askPrice) if t.askPrice is not None and not util.isNan(t.askPrice) else None
+                                self._on_tape_quote(bid, ask)
+                            elif isinstance(t, TickByTickAllLast):
+                                price = float(t.price)
+                                size  = int(t.size)
+                                # only guard price for NaN; size is already an int
+                                if util.isNan(price):
+                                    continue
+                                self._on_tape_trade({
+                                    "sym": self._symbol,
+                                    "price": price,
+                                    "size": size,
+                                    "bid": None, "ask": None, "timeISO": None,
+                                })
+                        except Exception as e:
+                            log_debug(f"TBT pump item error: {e}")
+                    self._tbt_index = n
+                # short sleep keeps latency low but avoids a hot loop
+                await asyncio.sleep(0.05)  # 50 ms
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            log_debug(f"_on_tbt_bidask processing error: {e}")
-
-    def _on_tbt_alllast(self, ticker: Ticker, t: TickByTickAllLast):
-        """Called by ib.tickByTickAllLastEvent; emits trades to the websocket."""
-        if not self._contract or not ticker or not ticker.contract or ticker.contract.conId != self._contract.conId:
-            return
-        try:
-            price = float(t.price)
-            size  = int(t.size)
-            if util.isNan(price) or util.isNan(size):
-                return
-            if DEBUG:
-                log_debug(f"TBT AllLast Event: price={price} size={size}")
-            ev = {
-                "sym": self._symbol,
-                "price": price,
-                "size": size,
-                "bid": None, "ask": None, "timeISO": None,
-            }
-            self._on_tape_trade(ev)
-        except Exception as e:
-            log_debug(f"_on_tbt_alllast processing error: {e}")
+            log_debug(f"TBT pump crashed: {e}")
+        finally:
+            log_debug("TBT pump stopped.")
 
