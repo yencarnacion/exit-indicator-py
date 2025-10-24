@@ -61,6 +61,46 @@ def _sound(filename: str):
         return PlainTextResponse("not found", status_code=404)
     headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     return FileResponse(path, headers=headers, media_type="audio/mpeg")
+# --- YAML endpoints ---
+CONFIG_DATA_DIR = Path("./config-data")
+
+def _read_yaml_or_default(filename: str, default_text: str) -> str:
+    try:
+        if CONFIG_DATA_DIR.exists():
+            p = CONFIG_DATA_DIR / filename
+            if p.exists() and p.is_file():
+                return p.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return default_text
+
+@app.get("/api/yaml/watchlist", include_in_schema=False)
+def yaml_watchlist():
+    """
+    Returns YAML for the ticker combobox.
+    Expected structure (example):
+      watchlist:
+        - symbol: "AAPL"
+        - symbol: "MSFT"
+    """
+    default_ = "watchlist: []\n"
+    txt = _read_yaml_or_default("watchlist.yaml", default_)
+    # 'text/yaml' is fine; many clients also use 'application/x-yaml'
+    return PlainTextResponse(txt, media_type="text/yaml")
+
+@app.get("/api/yaml/thresholds", include_in_schema=False)
+def yaml_thresholds():
+    """
+    Returns YAML for the threshold combobox.
+    Expected structure (example from prompt):
+      watchlist:
+        - thresholds: 5000
+        - thresholds: 10000
+        - thresholds: 20000
+    """
+    default_ = "watchlist: []\n"
+    txt = _read_yaml_or_default("thresholds.yaml", default_)
+    return PlainTextResponse(txt, media_type="text/yaml")
 # --- API models ---
 class StartReq(BaseModel):
     symbol: str

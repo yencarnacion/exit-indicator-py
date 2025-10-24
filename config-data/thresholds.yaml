@@ -1,0 +1,4 @@
+watchlist:
+  - thresholds: 5000
+  - thresholds: 10000
+  - thresholds: 20000

@@ -19,11 +19,35 @@
         <span id="statusBadge" class="badge badge-disconnected">Disconnected</span>
       </div>
     </header>
+
     <section class="controls">
+      <!-- TICKER combobox -->
       <div class="field">
-        <label for="symbolInput">Ticker</label>
-        <input id="symbolInput" type="text" placeholder="AAPL" autocomplete="off"/>
+        <label for="tickerInput">Ticker</label>
+        <!-- Hidden mirrors selected value for app.js compatibility -->
+        <input id="symbolInput" type="hidden" value=""/>
+        <div class="combo" id="tickerCombo" role="combobox" aria-haspopup="listbox" aria-expanded="false" data-max-selected="1">
+          <div class="tokenbox" id="tickerTokenbox">
+            <input
+              id="tickerInput"
+              class="combo-input"
+              type="text"
+              placeholder="Select or type a stock symbol"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              aria-autocomplete="list"
+              aria-controls="tickerListbox"
+              aria-activedescendant=""
+            />
+          </div>
+          <div id="tickerListbox" class="dropdown" role="listbox" tabindex="-1" aria-label="Stock symbols"></div>
+        </div>
+        <div id="tickerError" class="combo-error" aria-live="polite"></div>
       </div>
+
+      <!-- Side (unchanged) -->
       <div class="field">
         <label>Side</label>
         <div class="radio-group" id="sideGroup">
@@ -37,16 +61,41 @@
           </label>
         </div>
       </div>
+
+      <!-- THRESHOLD combobox -->
       <div class="field">
-        <label for="thresholdInput">Threshold (shares)</label>
-        <input id="thresholdInput" type="number" min="1"/>
+        <label for="thresholdVisInput">Threshold (shares)</label>
+        <!-- Hidden mirrors selected value for app.js compatibility -->
+        <input id="thresholdInput" type="hidden" value=""/>
+        <div class="combo" id="thresholdCombo" role="combobox" aria-haspopup="listbox" aria-expanded="false" data-max-selected="1">
+          <div class="tokenbox" id="thresholdTokenbox">
+            <input
+              id="thresholdVisInput"
+              class="combo-input"
+              type="text"
+              placeholder="Select or type a threshold"
+              inputmode="numeric"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              aria-autocomplete="list"
+              aria-controls="thresholdListbox"
+              aria-activedescendant=""
+            />
+          </div>
+          <div id="thresholdListbox" class="dropdown" role="listbox" tabindex="-1" aria-label="Thresholds"></div>
+        </div>
+        <div id="thresholdError" class="combo-error" aria-live="polite"></div>
       </div>
+
       <div class="buttons">
         <button id="startBtn">Subscribe</button>
         <button id="stopBtn" class="secondary">Stop</button>
         <button id="testSoundBtn" class="secondary">Test Sound</button>
       </div>
     </section>
+
     <section class="book">
       <!-- Summary stats row -->
       <div class="book-stats" id="bookStats">
@@ -58,7 +107,7 @@
       </div>
 
       <div class="book-panels">
-        <!-- BID panel (left) -->
+        <!-- (book tables unchanged) -->
         <div class="book-panel bid">
           <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
             <span class="chip chip-neutral">&lt;1×</span>
@@ -77,7 +126,6 @@
             <tbody></tbody>
           </table>
         </div>
-        <!-- ASK panel (right) -->
         <div class="book-panel ask">
           <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
             <span class="chip chip-neutral">&lt;1×</span>
@@ -98,11 +146,323 @@
         </div>
       </div>
     </section>
+
     <section class="alerts">
       <h2>Alert Log</h2>
       <div id="alertLog" class="log"></div>
     </section>
   </div>
+
+  <!-- app core first -->
   <script src="/app.js"></script>
+
+  <!-- yaml parser for the combobox data -->
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+
+  <!-- combobox wiring -->
+  <script>
+  (function () {
+    // Generic combobox factory (single-select). Parameterized for Ticker & Thresholds.
+    function initYamlCombo(opts) {
+      const {
+        comboId, tokenboxId, inputId, listboxId, hiddenId, errorId,
+        fetchUrl, cacheKey, placeholder, normalize, isValid, keyCandidates
+      } = opts;
+
+      const combo = document.getElementById(comboId);
+      const tokenbox = document.getElementById(tokenboxId);
+      const input = document.getElementById(inputId);
+      const listbox = document.getElementById(listboxId);
+      const hidden = document.getElementById(hiddenId);
+      const errorEl = document.getElementById(errorId);
+
+      const MAX_SELECTED = 1;
+      const selected = new Set();
+      let baseList = [];
+      let filtered = [];
+      let focusedIndex = -1;
+
+      function err(msg) { if (errorEl) errorEl.textContent = msg || ''; }
+      function clearErr() { err(''); }
+
+      function extractValue(obj) {
+        for (const k of keyCandidates) {
+          if (obj && Object.prototype.hasOwnProperty.call(obj, k)) {
+            const v = obj[k];
+            if (v === 0 || v) return String(v);
+          }
+        }
+        // fallback: if obj is a scalar or has a single property
+        if (typeof obj === 'string' || typeof obj === 'number') return String(obj);
+        const keys = obj ? Object.keys(obj) : [];
+        return keys.length ? String(obj[keys[0]]) : '';
+      }
+
+      async function loadYaml() {
+        try {
+          const res = await fetch(fetchUrl, { cache: 'no-store' });
+          const txt = await res.text();
+          if (!window.jsyaml) { err('js-yaml failed to load.'); return; }
+          const data = window.jsyaml.load(txt) || {};
+          const arr = Array.isArray(data.watchlist) ? data.watchlist : [];
+          baseList = arr
+            .map(extractValue)
+            .map(s => normalize(String(s)))
+            .filter(Boolean);
+          clearErr();
+        } catch (e) {
+          err('Failed to load options; type to add your own.');
+          baseList = [];
+        }
+      }
+
+      // session cache enables user-entered values to appear as suggestions later in the session
+      const cache = {
+        key: cacheKey,
+        get() {
+          try {
+            return (JSON.parse(sessionStorage.getItem(cacheKey)) || [])
+              .map(o => o && o.value ? normalize(String(o.value)) : '')
+              .filter(Boolean);
+          } catch { return []; }
+        },
+        add(val) {
+          const prev = cache.get();
+          if (!prev.includes(val)) {
+            prev.push(val);
+            sessionStorage.setItem(cacheKey, JSON.stringify(prev.map(v => ({ value: v }))));
+          }
+        }
+      };
+
+      function suggestionUniverse() {
+        const fromCache = cache.get().filter(s => !baseList.includes(s));
+        return [...baseList, ...fromCache];
+      }
+
+      function syncHidden() {
+        const v = [...selected][0] || '';
+        hidden.value = v;
+        // bubble a "change" for app.js listeners
+        hidden.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      function renderTokens() {
+        [...tokenbox.querySelectorAll('.token')].forEach(n => n.remove());
+        [...selected].forEach(val => {
+          const t = document.createElement('span');
+          t.className = 'token';
+          t.setAttribute('data-value', val);
+          t.innerHTML = `${val} <button type="button" aria-label="Remove ${val}">&times;</button>`;
+          t.querySelector('button').addEventListener('click', () => {
+            selected.clear();
+            renderTokens(); syncHidden();
+            input.readOnly = false;
+            input.placeholder = placeholder;
+            filterAndRender(input.value);
+            input.focus();
+          });
+          tokenbox.insertBefore(t, input);
+        });
+      }
+
+      function openDropdown() {
+        combo.setAttribute('aria-expanded', 'true');
+        listbox.classList.add('open');
+      }
+      function closeDropdown() {
+        combo.setAttribute('aria-expanded', 'false');
+        listbox.classList.remove('open');
+        focusedIndex = -1;
+        input.setAttribute('aria-activedescendant', '');
+      }
+
+      function focusByIndex(idx) {
+        const options = listbox.querySelectorAll('.option');
+        options.forEach(o => o.classList.remove('focused'));
+        if (idx >= 0 && idx < options.length) {
+          focusedIndex = idx;
+          const el = options[idx];
+          el.classList.add('focused');
+          input.setAttribute('aria-activedescendant', el.id);
+          const r = el.getBoundingClientRect();
+          const pr = listbox.getBoundingClientRect();
+          if (r.top < pr.top) listbox.scrollTop -= (pr.top - r.top);
+          if (r.bottom > pr.bottom) listbox.scrollTop += (r.bottom - pr.bottom);
+        } else {
+          focusedIndex = -1;
+          input.setAttribute('aria-activedescendant', '');
+        }
+      }
+
+      function filterAndRender(query) {
+        listbox.innerHTML = '';
+        const q = normalize(query || '');
+        const already = new Set(selected);
+
+        filtered = suggestionUniverse()
+          .filter(opt => !already.has(opt))
+          .filter(opt => q === '' ? true : opt.startsWith(q));
+
+        if (filtered.length === 0) {
+          const div = document.createElement('div');
+          div.className = 'no-results';
+          div.textContent = q && isValid(q) ? `Press Enter to add "${q}"` :
+                            (q ? 'No matches' : 'Type to search');
+          listbox.appendChild(div);
+          return;
+        }
+
+        filtered.forEach((opt, idx) => {
+          const d = document.createElement('div');
+          d.className = 'option';
+          d.setAttribute('role', 'option');
+          d.setAttribute('id', `${listboxId}-opt-${idx}`);
+          d.setAttribute('aria-selected', 'false');
+          d.textContent = opt;
+          d.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            addValue(opt);
+          });
+          listbox.appendChild(d);
+        });
+        focusByIndex(focusedIndex);
+      }
+
+      function addValue(raw) {
+        const val = normalize(raw);
+        if (!isValid(val)) { err('Invalid value'); return; }
+        selected.clear();
+        selected.add(val);
+        cache.add(val);
+        renderTokens();
+        input.value = '';
+        input.readOnly = true;
+        input.placeholder = `Selected: ${val}`;
+        closeDropdown();
+        syncHidden();
+      }
+
+      // Events
+      tokenbox.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.token button')) return;
+        e.preventDefault();
+        input.focus();
+        filterAndRender(input.value);
+        openDropdown();
+      });
+
+      input.addEventListener('focus', () => {
+        filterAndRender(input.value);
+        openDropdown();
+      });
+      input.addEventListener('input', () => {
+        filterAndRender(input.value);
+        openDropdown();
+      });
+      input.addEventListener('keydown', (e) => {
+        const options = listbox.querySelectorAll('.option');
+        switch (e.key) {
+          case 'ArrowDown':
+            e.preventDefault();
+            if (!listbox.classList.contains('open')) openDropdown();
+            focusByIndex(Math.min(focusedIndex + 1, options.length - 1));
+            break;
+          case 'ArrowUp':
+            e.preventDefault();
+            focusByIndex(Math.max(focusedIndex - 1, -1));
+            break;
+          case 'Enter':
+            e.preventDefault();
+            if (focusedIndex >= 0 && options[focusedIndex]) {
+              addValue(options[focusedIndex].textContent);
+            } else {
+              const v = normalize(input.value);
+              if (isValid(v)) addValue(v);
+            }
+            break;
+          case 'Backspace':
+            if (input.value === '' && selected.size) {
+              selected.clear(); renderTokens(); syncHidden();
+              input.readOnly = false; input.placeholder = placeholder;
+              filterAndRender('');
+            }
+            break;
+          case 'Escape':
+            closeDropdown();
+            break;
+        }
+      });
+      document.addEventListener('click', (e) => {
+        if (!combo.contains(e.target)) closeDropdown();
+      });
+
+      // Boot: load YAML → optionally seed initial value → render
+      (async () => {
+        await loadYaml();
+        renderTokens();
+        filterAndRender('');
+      })();
+
+      return {
+        setInitial(value) {
+          const v = normalize(String(value || ''));
+          if (!v) return;
+          selected.clear();
+          selected.add(v);
+          cache.add(v);
+          renderTokens();
+          input.value = '';
+          input.readOnly = true;
+          input.placeholder = `Selected: ${v}`;
+          closeDropdown();
+          syncHidden();
+        }
+      };
+    }
+
+    // --- Initialize both combos ---
+    const tickerCombo = initYamlCombo({
+      comboId: 'tickerCombo',
+      tokenboxId: 'tickerTokenbox',
+      inputId: 'tickerInput',
+      listboxId: 'tickerListbox',
+      hiddenId: 'symbolInput',
+      errorId: 'tickerError',
+      fetchUrl: '/api/yaml/watchlist',
+      cacheKey: 'ei.ticker.custom',
+      placeholder: 'Select or type a stock symbol',
+      normalize: s => s.trim().toUpperCase(),
+      isValid: s => /^[A-Z0-9.\-]{1,10}$/.test(s),
+      keyCandidates: ['symbol', 'ticker', 'value']
+    });
+
+    const thresholdCombo = initYamlCombo({
+      comboId: 'thresholdCombo',
+      tokenboxId: 'thresholdTokenbox',
+      inputId: 'thresholdVisInput',
+      listboxId: 'thresholdListbox',
+      hiddenId: 'thresholdInput',
+      errorId: 'thresholdError',
+      fetchUrl: '/api/yaml/thresholds',
+      cacheKey: 'ei.threshold.custom',
+      placeholder: 'Select or type a threshold',
+      normalize: s => String(s).trim().replace(/[, ]+/g,''),
+      isValid: s => /^\d{1,10}$/.test(s),  // numeric shares only
+      keyCandidates: ['thresholds', 'threshold', 'value', 'shares']
+    });
+
+    // Seed the threshold chip to match server's current/default value,
+    // so the UI and server state are aligned from the first render.
+    (async () => {
+      try {
+        const res = await fetch('/api/config', { cache: 'no-store' });
+        const cfg = await res.json();
+        const initialThr = cfg.currentThresholdShares || cfg.defaultThresholdShares || 20000;
+        thresholdCombo.setInitial(initialThr);
+      } catch {}
+    })();
+  })();
+  </script>
 </body>
 </html>
