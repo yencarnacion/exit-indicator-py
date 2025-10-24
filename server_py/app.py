@@ -8,6 +8,7 @@ from math import isfinite
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
+import yaml as _yaml
 from .config import Config
 from .state import State
 from .sound import sound_info
@@ -105,20 +106,43 @@ def yaml_watchlist():
 def yaml_thresholds():
     """
     Returns YAML for the threshold combobox.
-    Expected structure (example from prompt):
+    Normalizes your on-disk root:
+      thresholds.yaml:
+        thresholds:
+          - threshold: 5000
+          - threshold: 10000
+    ...into the UI-consumed shape:
       watchlist:
-        - thresholds: 5000
-        - thresholds: 10000
-        - thresholds: 20000
+        - threshold: 5000
+        - threshold: 10000
     """
     default_ = "watchlist: []\n"
     txt = _read_yaml_or_default("thresholds.yaml", default_)
+    try:
+        data = _yaml.safe_load(txt) or {}
+        # accept either `watchlist:` or your chosen `thresholds:` root
+        arr = data.get("watchlist")
+        if not isinstance(arr, list):
+            arr = data.get("thresholds", [])
+        if not isinstance(arr, list):
+            arr = []
+        txt = _yaml.safe_dump({"watchlist": arr}, sort_keys=False)
+    except Exception:
+        # fall through with raw txt if something odd happens
+        pass
     return PlainTextResponse(txt, media_type="text/yaml")
 
 @app.get("/api/yaml/dollar-values", include_in_schema=False)
 def yaml_dollar_values():
     """
-    Option A shape:
+    Returns YAML for the Dollar value combobox.
+    Normalizes your on-disk root:
+      dollar-value.yaml:
+        dollarvalue:
+          - label: "$10"
+            threshold: 1000
+            big_threshold: 10000
+    ...into the UI-consumed shape:
       watchlist:
         - label: "$10"
           threshold: 1000
@@ -126,6 +150,17 @@ def yaml_dollar_values():
     """
     default_ = "watchlist: []\n"
     txt = _read_yaml_or_default("dollar-value.yaml", default_)
+    try:
+        data = _yaml.safe_load(txt) or {}
+        # accept either `watchlist:` or your chosen `dollarvalue:` root
+        arr = data.get("watchlist")
+        if not isinstance(arr, list):
+            arr = data.get("dollarvalue", [])
+        if not isinstance(arr, list):
+            arr = []
+        txt = _yaml.safe_dump({"watchlist": arr}, sort_keys=False)
+    except Exception:
+        pass
     return PlainTextResponse(txt, media_type="text/yaml")
 # --- API models ---
 class StartReq(BaseModel):
