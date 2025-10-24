@@ -280,6 +280,28 @@
     if (els.last)    els.last.textContent    = fmtP(s.last);
     if (els.vol)     els.vol.textContent     = fmtV(s.volume);
   }
+
+  // --- Log utilities (newest at top + stable scroll) ---
+  function prependLogItem(node) {
+    const c = els.log;
+    if (!c) return;
+    // If the user is at the very top, keep showing the newest at top.
+    // If they've scrolled away, keep their viewport stable even as new items come in.
+    const AT_TOP_THRESHOLD = 1; // px tolerance
+    const atTop = c.scrollTop <= AT_TOP_THRESHOLD;
+    const prevScrollTop = c.scrollTop;
+    const prevScrollHeight = c.scrollHeight;
+    // Insert the new item at the top
+    c.prepend(node);
+    const newScrollHeight = c.scrollHeight;
+    if (atTop) {
+      // Stick to top: newest visible
+      c.scrollTop = 0;
+    } else {
+      // Preserve viewport: compensate for the added height above
+      c.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+    }
+  }
   function pulseRowForAlert(a) {
     const key = priceKey(a.price);
     const tbody = (a.side === 'BID') ? els.bookBidBody : els.bookAskBody;
@@ -300,13 +322,13 @@
     const ts = new Date(a.timeISO || Date.now());
     const sideLabel = (a.side || 'ASK') === 'BID' ? 'bid' : 'ask';
     el.textContent = `[${ts.toLocaleTimeString()}] ${a.symbol} ${sideLabel} ${parseFloat(a.price).toFixed(2)}: ${(+a.sumShares).toLocaleString()} shares`;
-    els.log.prepend(el);
+    prependLogItem(el);
   }
   function appendError(msg) {
     const el = document.createElement('div');
     el.className = 'log-item error';
     el.textContent = `Error: ${msg}`;
-    els.log.prepend(el);
+    prependLogItem(el);
   }
   async function start() {
     const symbol = (els.sym.value || '').trim().toUpperCase(); // Uppercase symbol

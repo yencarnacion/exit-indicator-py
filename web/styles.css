@@ -94,7 +94,14 @@ button.secondary { background: #203047; color: #dbe6f2; }
   100% { box-shadow: 0 0 0 14px rgba(228, 76, 76, 0); }
 }
 
-.alerts .log { display: flex; flex-direction: column-reverse; gap: 6px; max-height: 240px; overflow: auto; }
+/* Alert log: newest at the top; DOM order === visual order.
+   We disable CSS scroll-anchoring here and handle anchoring in JS
+   so that when new items are prepended the user's viewport doesn't jump. */
+.alerts .log {
+  display: flex;
+  flex-direction: column;
+  gap: 6px; max-height: 240px; overflow: auto; overflow-anchor: none;
+}
 .log-item { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 13px; color: var(--text); }
 .log-item.error { color: var(--danger); }
 
