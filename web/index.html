@@ -237,6 +237,14 @@
         return keys.length ? String(obj[keys[0]]) : '';
       }
 
+      // Pretty text for display; keep JSON for storage
+      function toDisplay(val) {
+        try { const j = JSON.parse(String(val));
+          if (j && typeof j === 'object' && j.label) return String(j.label);
+        } catch (_) {}
+        return String(val);
+      }
+
       async function loadYaml() {
         try {
           const res = await fetch(fetchUrl, { cache: 'no-store' });
@@ -244,10 +252,19 @@
           if (!window.jsyaml) { err('js-yaml failed to load.'); return; }
           const data = window.jsyaml.load(txt) || {};
           const arr = Array.isArray(data.watchlist) ? data.watchlist : [];
-          baseList = arr
-            .map(extractValue)
-            .map(s => normalize(String(s)))
-            .filter(Boolean);
+          // If items look like Option A (label/threshold/big_threshold),
+          // store each option as JSON, but display only the label.
+          const looksOptionA = arr.some(o => o && typeof o === 'object' &&
+            ('label' in o) && ('threshold' in o || 'big_threshold' in o));
+          if (looksOptionA) {
+            baseList = arr.map(o => JSON.stringify({
+              label: String(o.label ?? ''),
+              threshold: Number(o.threshold ?? 0),
+              big_threshold: Number(o.big_threshold ?? 0),
+            }));
+          } else {
+            baseList = arr.map(extractValue).map(s => normalize(String(s))).filter(Boolean);
+          }
           clearErr();
         } catch (e) {
           err('Failed to load options; type to add your own.');
@@ -292,7 +309,8 @@
           const t = document.createElement('span');
           t.className = 'token';
           t.setAttribute('data-value', val);
-          t.innerHTML = `${val} <button type="button" aria-label="Remove ${val}">&times;</button>`;
+          const label = toDisplay(val);
+          t.innerHTML = `${label} <button type="button" aria-label="Remove ${label}">&times;</button>`;
           t.querySelector('button').addEventListener('click', () => {
             selected.clear();
             renderTokens(); syncHidden();
@@ -341,7 +359,10 @@
 
         filtered = suggestionUniverse()
           .filter(opt => !already.has(opt))
-          .filter(opt => q === '' ? true : opt.startsWith(q));
+          .filter(opt => {
+            const text = toDisplay(opt);
+            return q === '' ? true : text.toUpperCase().startsWith(q.toUpperCase());
+          });
 
         if (filtered.length === 0) {
           const div = document.createElement('div');
@@ -358,7 +379,7 @@
           d.setAttribute('role', 'option');
           d.setAttribute('id', `${listboxId}-opt-${idx}`);
           d.setAttribute('aria-selected', 'false');
-          d.textContent = opt;
+          d.textContent = toDisplay(opt);
           d.addEventListener('mousedown', (e) => {
             e.preventDefault();
             addValue(opt);
@@ -377,7 +398,7 @@
         renderTokens();
         input.value = '';
         input.readOnly = true;
-        input.placeholder = `Selected: ${val}`;
+        input.placeholder = `Selected: ${toDisplay(val)}`;
         closeDropdown();
         syncHidden();
       }

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Optional, Tuple, List
 from ib_async import IB, Stock, util, Contract, Ticker, DOMLevel
+from ib_async.objects import TickByTickAllLast, TickByTickBidAsk
 from .depth import DepthLevel
 
 # --- SET TO TRUE TO ENABLE VERBOSE LOGGING ---
@@ -55,6 +56,7 @@ class IBDepthManager:
         # tick-by-tick handlers
         self._tbt_bidask_id: Optional[int] = None
         self._tbt_trades_id: Optional[int] = None
+        self._tbt_index: int = 0  # last-consumed index in Ticker.tickByTicks
         log_debug("IBDepthManager initialized.")
 
     async def run(self):
@@ -121,6 +123,7 @@ class IBDepthManager:
         self._last_price, self._day_volume = None, None
         self._tbt_bidask_id = None
         self._tbt_trades_id = None
+        self._tbt_index = 0
 
         if quote_ticker_to_cancel:
             try: quote_ticker_to_cancel.updateEvent -= self._on_quote_update
@@ -180,13 +183,15 @@ class IBDepthManager:
 
             # --- Tick-by-tick subscriptions ---
             # BidAsk for live NBBO-like reference
-            self._tbt_bidask_id = self.ib.reqTickByTickData(self._contract, "BidAsk", numberOfTicks=0, ignoreSize=False)
-            self.ib.tickByTickBidAskEvent.clear()
-            self.ib.tickByTickBidAskEvent += self._on_tbt_bidask
+            self._tbt_bidask_id = self.ib.reqTickByTickData(
+                self._contract, "BidAsk", numberOfTicks=0, ignoreSize=False
+            )
             # AllLast for prints (includes odd-lots & UTP where available)
-            self._tbt_trades_id = self.ib.reqTickByTickData(self._contract, "AllLast", numberOfTicks=0, ignoreSize=False)
-            self.ib.tickByTickAllLastEvent.clear()
-            self.ib.tickByTickAllLastEvent += self._on_tbt_alllast
+            self._tbt_trades_id = self.ib.reqTickByTickData(
+                self._contract, "AllLast", numberOfTicks=0, ignoreSize=False
+            )
+            # consume via pendingTickersEvent; start from current end of list
+            self._tbt_index = 0
 
         except Exception as e:
             log_debug(f"CRITICAL ERROR during _subscribe_symbol for '{symbol}': {e}")
@@ -202,9 +207,11 @@ class IBDepthManager:
     def _on_pending_tickers(self, tickers: List[Ticker]):
         """This is the primary event handler for processing all market data updates."""
         now_ms = time.time() * 1000.0
-        # Check for quote updates first
+        # Check for quote updates first (keeps last/volume fresh for stats)
         if self._quote_ticker and self._quote_ticker in tickers:
-            self._on_quote_update(self._quote_ticker, True) # Force update
+            self._on_quote_update(self._quote_ticker, True)  # Force update
+            # Also consume tick-by-tick data from this ticker
+            self._consume_tick_by_tick(self._quote_ticker)
 
         # Check for depth updates, with throttling
         if self._ticker and self._ticker in tickers:
@@ -217,6 +224,8 @@ class IBDepthManager:
                 asks = self._convert_dom(self._ticker.domAsks, "ASK")
                 bids = self._convert_dom(self._ticker.domBids, "BID")
                 self._on_snapshot(self._symbol, asks, bids)
+                # Depth ticker may also receive tick-by-tick updates (defensive)
+                self._consume_tick_by_tick(self._ticker)
     
     def _on_quote_update(self, ticker: Ticker, hasNewData: bool):
         if ticker is not self._quote_ticker: return
@@ -242,29 +251,37 @@ class IBDepthManager:
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
         return out
 
-    # --- Tick-by-tick handlers ---
-    def _on_tbt_bidask(self, reqId, time, bidPrice, askPrice, bidSize, askSize, tickAttribBidAsk):
-        # Keep last seen for classification; broadcast a lightweight quote
-        try:
-            self._on_tape_quote(float(bidPrice) if bidPrice else None, float(askPrice) if askPrice else None)
-        except Exception as e:
-            log_debug(f"_on_tbt_bidask error: {e}")
-
-    def _on_tbt_alllast(self, reqId, time, price, size, tickAttribLast, exchange, specialConditions):
-        # Build TickSonic-like event and let app.py apply filtering
-        try:
-            # Access NBBO-ish bid/ask from last tick-by-tick callback is not cached by ib_async,
-            # so we rely on app-side state (State) to filter/format. Here, pass raw data.
-            ev = {
-                "sym": self._symbol,
-                "price": float(price),
-                "size": int(size),
-                # app will compute bid/ask/spread classification from its own latest quote
-                "bid": None,
-                "ask": None,
-                "timeISO": None,
-            }
-            self._on_tape_trade(ev)
-        except Exception as e:
-            log_debug(f"_on_tbt_alllast error: {e}")
+    # --- Tick-by-tick consumption via Ticker.tickByTicks ---
+    def _consume_tick_by_tick(self, ticker: Ticker):
+        """Read newly appended tick-by-tick items from the given ticker and fan out."""
+        if not ticker or not ticker.tickByTicks or not self._contract:
+            return
+        if not ticker.contract or ticker.contract.conId != self._contract.conId:
+            return
+        items = ticker.tickByTicks
+        n = len(items)
+        start = self._tbt_index
+        if start >= n:
+            return
+        # Consume [start, n)
+        for i in range(start, n):
+            t = items[i]
+            try:
+                if isinstance(t, TickByTickBidAsk):
+                    bid = float(t.bidPrice) if t.bidPrice is not None else None
+                    ask = float(t.askPrice) if t.askPrice is not None else None
+                    self._on_tape_quote(bid, ask)
+                elif isinstance(t, TickByTickAllLast):
+                    ev = {
+                        "sym": self._symbol,
+                        "price": float(t.price),
+                        "size": int(t.size),
+                        "bid": None,
+                        "ask": None,
+                        "timeISO": None,
+                    }
+                    self._on_tape_trade(ev)
+            except Exception as e:
+                log_debug(f"_consume_tick_by_tick item error: {e}")
+        self._tbt_index = n
 
