@@ -208,6 +208,7 @@ body.compact .stat { padding: 6px 8px; }
 .tape {
   height: calc(100% - 30px);
   overflow: auto;
+  overflow-anchor: none; /* we manage anchoring in JS (newest-at-top) */
   line-height: 1.1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 13px;

@@ -405,13 +405,33 @@
       <div class="sym">${ev.sym || activeSymbol || ''}</div>`;
     return row;
   }
+
+  // --- T&S: prepend row (newest at top) with stable scroll anchoring ---
+  function prependTapeRow(row) {
+    const c = els.tape;
+    if (!c) return;
+    const AT_TOP_THRESHOLD = 1; // px tolerance to consider "at top"
+    const atTop = c.scrollTop <= AT_TOP_THRESHOLD;
+    const prevScrollTop = c.scrollTop;
+    const prevScrollHeight = c.scrollHeight;
+    // Insert newest at the top
+    c.prepend(row);
+    // Trim to 1000 rows (remove from bottom)
+    while (c.childElementCount > 1000) c.removeChild(c.lastElementChild);
+    const newScrollHeight = c.scrollHeight;
+    if (atTop) {
+      // Keep newest visible at the top
+      c.scrollTop = 0;
+    } else {
+      // Preserve viewport position while we injected content above
+      c.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+    }
+  }
+
   function onTSTrade(ev){
     if (!els.tape) return;
-    // append and keep scrolled to bottom (TickSonic style)
-    const atBottom = (els.tape.scrollTop + els.tape.clientHeight + 4) >= els.tape.scrollHeight;
-    els.tape.appendChild(tsRow(ev));
-    while (els.tape.childElementCount > 1000) els.tape.removeChild(els.tape.firstElementChild);
-    if (atBottom) els.tape.scrollTop = els.tape.scrollHeight;
+    // prepend and keep scrolled to TOP unless user has scrolled away
+    prependTapeRow(tsRow(ev));
     // sound (mute respected)
     if (globalSilent || !TS_AUDIO.ready) return;
     const big = !!ev.big;
