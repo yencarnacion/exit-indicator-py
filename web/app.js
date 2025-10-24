@@ -395,13 +395,18 @@
       "between_ask":"col-white","between_bid":"col-white","at_bid":"col-red","below_bid":"col-magenta"
     }[ev.side] || "col-white";
     const priceStr = fmt2(ev.price);
+    // time as MM:SS (no hour)
+    const dt = ev.timeISO ? new Date(ev.timeISO) : new Date();
+    const timeStr = dt.toLocaleTimeString([], { minute: '2-digit', second: '2-digit' });
+    // shares: reuse Level 2 formatter
+    const sharesStr = formatShares(Number(ev.size) || 0);
     row.innerHTML = `
       <div class="left">
         <span class="badge ${colorClass}">${ev.side.replaceAll('_',' ')}</span>
         <span class="price ${colorClass}">${priceStr}</span>
-        <span class="amt">$${ev.amountStr || ''}</span>
+        <span class="amt">$${ev.amountStr || ''} <span class="shares">(${sharesStr})</span></span>
       </div>
-      <div class="time">${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>
+      <div class="time">${timeStr}</div>
       <div class="sym">${ev.sym || activeSymbol || ''}</div>`;
     return row;
   }

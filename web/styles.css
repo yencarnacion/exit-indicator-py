@@ -222,7 +222,13 @@ body.compact .stat { padding: 6px 8px; }
 .tape .badge{ font-size:11px; padding:2px 6px; border-radius:4px; background:#242938; color:#b3b9c7; }
 .tape .price{ opacity:.9; }
 .tape .amt{ font-weight:700; }
-.tape .time{ color: var(--muted); min-width:42px; text-align:right; font-variant-numeric: tabular-nums; }
+.tape .shares{ opacity:.85; }
+.tape .time{
+  color: var(--muted);
+  flex: 0 0 5ch;                 /* fixed width for MM:SS to avoid drift */
+  text-align: right;
+  font-variant-numeric: tabular-nums;  /* tabular digits keep columns aligned */
+}
 .tape .sym { color:#b6beca; min-width:72px; text-align:right; }
 
 /* colors aligned with ticksonic */
