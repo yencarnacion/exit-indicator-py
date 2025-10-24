@@ -89,6 +89,36 @@
         <div id="thresholdError" class="combo-error" aria-live="polite"></div>
       </div>
 
+      <!-- DOLLAR (T&S) combobox -->
+      <div class="field">
+        <label for="dollarVisInput">Dollar value (T&S)</label>
+        <input id="dollarHidden" type="hidden" value=""/>
+        <div class="combo" id="dollarCombo" role="combobox" aria-haspopup="listbox" aria-expanded="false" data-max-selected="1">
+          <div class="tokenbox" id="dollarTokenbox">
+            <input
+              id="dollarVisInput"
+              class="combo-input"
+              type="text"
+              placeholder="Select a $ level"
+              inputmode="numeric" autocomplete="off"
+              autocapitalize="none" autocorrect="off" spellcheck="false"
+              aria-autocomplete="list" aria-controls="dollarListbox" aria-activedescendant=""
+            />
+          </div>
+          <div id="dollarListbox" class="dropdown" role="listbox" tabindex="-1" aria-label="Dollar values"></div>
+        </div>
+        <div id="dollarError" class="combo-error" aria-live="polite"></div>
+      </div>
+
+      <!-- Silent (global mute for alert+T&S) -->
+      <div class="field">
+        <label>&nbsp;</label>
+        <label class="check">
+          <input id="silentToggle" type="checkbox"/>
+          <span>Silent (mute all)</span>
+        </label>
+      </div>
+
       <div class="buttons">
         <button id="startBtn">Subscribe</button>
         <button id="stopBtn" class="secondary">Stop</button>
@@ -145,6 +175,15 @@
           </table>
         </div>
       </div>
+    </section>
+
+    <section class="tape-wrap" id="tapeWrap" aria-label="Time & Sales">
+      <div class="tape-quote">
+        <div>Bid: <span id="tapeBid">—</span></div>
+        <div>Ask: <span id="tapeAsk">—</span></div>
+        <div>Spread: <span id="tapeSpread">—</span></div>
+      </div>
+      <div class="tape" id="tape" aria-live="polite"></div>
     </section>
 
     <section class="alerts">
@@ -452,6 +491,43 @@
       keyCandidates: ['thresholds', 'threshold', 'value', 'shares']
     });
 
+    const dollarCombo = initYamlCombo({
+      comboId: 'dollarCombo',
+      tokenboxId: 'dollarTokenbox',
+      inputId: 'dollarVisInput',
+      listboxId: 'dollarListbox',
+      hiddenId: 'dollarHidden',
+      errorId: 'dollarError',
+      fetchUrl: '/api/yaml/dollar-values',
+      cacheKey: 'ei.dollar.custom',
+      placeholder: 'Select a $ level',
+      // Normalize to JSON string to carry label/threshold/big_threshold
+      normalize: (s) => String(s).trim(),
+      isValid: (s) => true,
+      keyCandidates: ['label','threshold','big_threshold','value']
+    });
+
+    // Option A: translate YAML entries into suggestion values (stored as JSON)
+    (async () => {
+      try {
+        const res = await fetch('/api/yaml/dollar-values', { cache: 'no-store' });
+        const txt = await res.text();
+        if (window.jsyaml) {
+          const data = window.jsyaml.load(txt) || {};
+          const arr = Array.isArray(data.watchlist) ? data.watchlist : [];
+          // Pick the first as initial (optional)
+          const first = arr[0];
+          if (first) {
+            dollarCombo.setInitial(JSON.stringify({
+              label: String(first.label || ''),
+              threshold: Number(first.threshold || 0),
+              big_threshold: Number(first.big_threshold || 0)
+            }));
+          }
+        }
+      } catch {}
+    })();
+
     // Seed the threshold chip to match server's current/default value,
     // so the UI and server state are aligned from the first render.
     (async () => {
@@ -463,6 +539,12 @@
       } catch {}
     })();
   })();
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(()=>{});
+    }
   </script>
 </body>
 </html>

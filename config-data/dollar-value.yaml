@@ -1,0 +1,13 @@
+watchlist:
+  - label: "$10"
+    threshold: 1000
+    big_threshold: 10000
+  - label: "$20"
+    threshold: 2000
+    big_threshold: 20000
+  - label: "$50"
+    threshold: 5000
+    big_threshold: 50000
+  - label: "$100"
+    threshold: 10000
+    big_threshold: 100000

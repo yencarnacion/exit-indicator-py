@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Set, Optional
+from math import isfinite
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
@@ -31,6 +32,8 @@ manager = IBDepthManager(
     on_status=lambda c: asyncio.create_task(broadcast_status(c)),
     on_snapshot=lambda sym, asks, bids: asyncio.create_task(on_dom_snapshot(sym, asks, bids)),
     on_error=lambda msg: asyncio.create_task(broadcast_error(msg)),
+    on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
+    on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
 )
 # --- lifecycle ---
 @app.on_event("startup")
@@ -61,6 +64,16 @@ def _sound(filename: str):
         return PlainTextResponse("not found", status_code=404)
     headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     return FileResponse(path, headers=headers, media_type="audio/mpeg")
+
+# Service worker for sound caching (cache-first on /sounds/*)
+@app.get("/sw.js", include_in_schema=False)
+def _sw():
+    p = WEB_DIR / "sw.js"
+    if not p.exists():
+        return PlainTextResponse("// no service worker", media_type="application/javascript")
+    # always revalidate SW
+    headers = {"Cache-Control": "no-cache"}
+    return FileResponse(p, headers=headers, media_type="application/javascript")
 # --- YAML endpoints ---
 CONFIG_DATA_DIR = Path("./config-data")
 
@@ -101,15 +114,34 @@ def yaml_thresholds():
     default_ = "watchlist: []\n"
     txt = _read_yaml_or_default("thresholds.yaml", default_)
     return PlainTextResponse(txt, media_type="text/yaml")
+
+@app.get("/api/yaml/dollar-values", include_in_schema=False)
+def yaml_dollar_values():
+    """
+    Option A shape:
+      watchlist:
+        - label: "$10"
+          threshold: 1000
+          big_threshold: 10000
+    """
+    default_ = "watchlist: []\n"
+    txt = _read_yaml_or_default("dollar-value.yaml", default_)
+    return PlainTextResponse(txt, media_type="text/yaml")
 # --- API models ---
 class StartReq(BaseModel):
     symbol: str
     threshold: Optional[int] = None
     side: Optional[str] = None
+    # T&S specific
+    dollar: Optional[int] = None
+    bigDollar: Optional[int] = None
+    silent: Optional[bool] = None
 class ThresholdReq(BaseModel):
     threshold: int
 class SideReq(BaseModel):
     side: str
+class SilentReq(BaseModel):
+    silent: bool
 # --- API routes ---
 @app.get("/api/health")
 def api_health():
@@ -126,6 +158,11 @@ def api_config():
         "soundAvailable": _snd.available,
         "soundURL": _snd.url,
         "currentSide": state.side,
+        # T&S config/state
+        "silent": state.silent,
+        "dollarThreshold": state.dollar_threshold,
+        "bigDollarThreshold": state.big_dollar_threshold,
+        "soundsPath": "/sounds/",  # base for ticksonic wavs
     }
 @app.post("/api/start")
 async def api_start(req: StartReq):
@@ -134,6 +171,10 @@ async def api_start(req: StartReq):
         state.set_threshold(req.threshold)
     if req.side:
         state.set_side(req.side)
+    # T&S thresholds + mute
+    state.set_tape_thresholds(req.dollar, req.bigDollar)
+    if req.silent is not None:
+        state.set_silent(req.silent)
     # Allow starts even if not yet connected, to match dev affordance
     await manager.subscribe_symbol(sym)
     await broadcast_status(state.connected)
@@ -154,6 +195,11 @@ async def api_threshold(req: ThresholdReq):
 async def api_side(req: SideReq):
     s = state.set_side(req.side)
     return {"ok": True, "side": s}
+
+@app.post("/api/silent")
+async def api_silent(req: SilentReq):
+    state.set_silent(req.silent)
+    return {"ok": True, "silent": state.silent}
 # --- WebSocket ---
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -239,3 +285,69 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
         await broadcast_book_full(ask_book, bid_book, best_ask, best_bid, last, volume)
     for a in alerts:
         await broadcast_alert(a)
+
+# --- T&S broadcasting (TickSonic-compatible payloads) ---
+
+def _fmt_amount(amount: float) -> tuple[str, bool]:
+    # returns (label, is_big_label) — label mirrors TickSonic style
+    if amount >= 1_000_000:
+        m = amount / 1_000_000
+        if abs(m - round(m)) < 1e-9:
+            return (f"{m:.0f} million", True)
+        return (f"{m:.1f} million", True)
+    if amount >= 1_000:
+        k = amount / 1_000
+        if abs(k - round(k)) < 1e-9:
+            return (f"{k:.0f}K", False)
+        return (f"{k:.1f}K", False)
+    return (f"{amount:.2f}", False)
+
+def _classify_trade(price: float, bid: Optional[float], ask: Optional[float]) -> tuple[str, str]:
+    eps = 1e-3
+    if not (isfinite(price) and (bid is None or isfinite(bid)) and (ask is None or isfinite(ask))):
+        return ("between_mid", "white")
+    b = bid or 0.0
+    a = ask or 0.0
+    if b == 0.0 or a == 0.0:
+        return ("between_mid", "white")
+    if abs(price - a) < eps: return ("at_ask", "green")
+    if abs(price - b) < eps: return ("at_bid", "red")
+    if price > a + eps:      return ("above_ask", "yellow")
+    if price < b - eps:      return ("below_bid", "magenta")
+    da = abs(price - a); db = abs(price - b)
+    if abs(da - db) < 1e-9:  return ("between_mid", "white")
+    return ("between_ask", "white") if da < db else ("between_bid", "white")
+
+# Keep most recent bid/ask seen (from tick-by-tick)
+_last_bid: Optional[float] = None
+_last_ask: Optional[float] = None
+
+async def broadcast_quote(bid: float | None, ask: float | None):
+    global _last_bid, _last_ask
+    if bid is not None: _last_bid = bid
+    if ask is not None: _last_ask = ask
+    await broadcast({"type": "quote", "bid": bid, "ask": ask, "timeISO": None})
+
+async def broadcast_trade(ev: dict):
+    # Pull inputs
+    sym = state.symbol or ev.get("sym") or ""
+    price = float(ev.get("price") or 0.0)
+    size  = int(ev.get("size") or 0)
+    amount = price * size
+    # Threshold filter (T&S only)
+    if state.dollar_threshold and amount < state.dollar_threshold:
+        return
+    # Classify vs last seen bid/ask
+    side, color = _classify_trade(price, _last_bid, _last_ask)
+    big = bool(state.big_dollar_threshold and amount >= state.big_dollar_threshold)
+    amountStr, _ = _fmt_amount(amount)
+    payload = {
+        "type": "trade",
+        "sym": sym, "price": price, "size": size,
+        "amount": amount, "amountStr": amountStr,
+        "timeISO": None,
+        "side": side, "color": color, "big": big,
+        "bid": _last_bid, "ask": _last_ask,
+        "silent": state.silent,
+    }
+    await broadcast(payload)

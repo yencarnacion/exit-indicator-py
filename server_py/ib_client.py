@@ -33,6 +33,8 @@ class IBDepthManager:
         on_status: Callable[[bool], None],
         on_snapshot: Callable[[str, List[DepthLevel], List[DepthLevel]], None],
         on_error: Callable[[str], None],
+        on_tape_quote: Callable[[Optional[float], Optional[float]], None],
+        on_tape_trade: Callable[[dict], None],
     ):
         self.cfg = cfg
         self.ib = IB()
@@ -43,11 +45,16 @@ class IBDepthManager:
         self._on_status = on_status
         self._on_snapshot = on_snapshot
         self._on_error = on_error
+        self._on_tape_quote = on_tape_quote
+        self._on_tape_trade = on_tape_trade
         self._stop_event = asyncio.Event()
         self._throttle_ms = 50
         self._last_emit_ms = 0
         self._last_price: Optional[float] = None
         self._day_volume: Optional[int] = None
+        # tick-by-tick handlers
+        self._tbt_bidask_id: Optional[int] = None
+        self._tbt_trades_id: Optional[int] = None
         log_debug("IBDepthManager initialized.")
 
     async def run(self):
@@ -112,6 +119,8 @@ class IBDepthManager:
         self._ticker = None
         self._quote_ticker = None
         self._last_price, self._day_volume = None, None
+        self._tbt_bidask_id = None
+        self._tbt_trades_id = None
 
         if quote_ticker_to_cancel:
             try: quote_ticker_to_cancel.updateEvent -= self._on_quote_update
@@ -127,6 +136,17 @@ class IBDepthManager:
             
             try: self.ib.cancelMktData(contract_to_cancel)
             except Exception as e: log_debug(f"Non-fatal error on cancelMktData: {e}")
+            # tick-by-tick cancelations
+            try:
+                if self._tbt_bidask_id is not None:
+                    self.ib.cancelTickByTickData(self._tbt_bidask_id)
+            except Exception as e:
+                log_debug(f"Non-fatal cancelTickByTickData(BidAsk): {e}")
+            try:
+                if self._tbt_trades_id is not None:
+                    self.ib.cancelTickByTickData(self._tbt_trades_id)
+            except Exception as e:
+                log_debug(f"Non-fatal cancelTickByTickData(AllLast): {e}")
 
             log_debug("Pausing for 0.5s to allow Gateway to process cancellations...")
             await asyncio.sleep(0.5)
@@ -157,6 +177,16 @@ class IBDepthManager:
             self._quote_ticker = self.ib.reqMktData(self._contract, "", False, False)
             log_debug(f"Created new MktData subscription for {self._symbol}.")
             self._quote_ticker.updateEvent += self._on_quote_update
+
+            # --- Tick-by-tick subscriptions ---
+            # BidAsk for live NBBO-like reference
+            self._tbt_bidask_id = self.ib.reqTickByTickData(self._contract, "BidAsk", numberOfTicks=0, ignoreSize=False)
+            self.ib.tickByTickBidAskEvent.clear()
+            self.ib.tickByTickBidAskEvent += self._on_tbt_bidask
+            # AllLast for prints (includes odd-lots & UTP where available)
+            self._tbt_trades_id = self.ib.reqTickByTickData(self._contract, "AllLast", numberOfTicks=0, ignoreSize=False)
+            self.ib.tickByTickAllLastEvent.clear()
+            self.ib.tickByTickAllLastEvent += self._on_tbt_alllast
 
         except Exception as e:
             log_debug(f"CRITICAL ERROR during _subscribe_symbol for '{symbol}': {e}")
@@ -211,4 +241,30 @@ class IBDepthManager:
             venue = getattr(r, "mm", "") or "SMART"
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
         return out
+
+    # --- Tick-by-tick handlers ---
+    def _on_tbt_bidask(self, reqId, time, bidPrice, askPrice, bidSize, askSize, tickAttribBidAsk):
+        # Keep last seen for classification; broadcast a lightweight quote
+        try:
+            self._on_tape_quote(float(bidPrice) if bidPrice else None, float(askPrice) if askPrice else None)
+        except Exception as e:
+            log_debug(f"_on_tbt_bidask error: {e}")
+
+    def _on_tbt_alllast(self, reqId, time, price, size, tickAttribLast, exchange, specialConditions):
+        # Build TickSonic-like event and let app.py apply filtering
+        try:
+            # Access NBBO-ish bid/ask from last tick-by-tick callback is not cached by ib_async,
+            # so we rely on app-side state (State) to filter/format. Here, pass raw data.
+            ev = {
+                "sym": self._symbol,
+                "price": float(price),
+                "size": int(size),
+                # app will compute bid/ask/spread classification from its own latest quote
+                "bid": None,
+                "ask": None,
+                "timeISO": None,
+            }
+            self._on_tape_trade(ev)
+        except Exception as e:
+            log_debug(f"_on_tbt_alllast error: {e}")
 

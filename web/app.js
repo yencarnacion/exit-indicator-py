@@ -17,12 +17,21 @@
     spread: document.getElementById('spread'),
     last: document.getElementById('lastPrice'),
     vol: document.getElementById('dayVolume'),
+    // T&S bits
+    tape: document.getElementById('tape'),
+    tapeBid: document.getElementById('tapeBid'),
+    tapeAsk: document.getElementById('tapeAsk'),
+    tapeSpread: document.getElementById('tapeSpread'),
+    silent: document.getElementById('silentToggle'),
+    dollarHidden: document.getElementById('dollarHidden'),
   };
   let ws;
   let audio;
   let audioReady = false;
   let soundURL = '';
   let soundAvailable = false;
+  let globalSilent = false;
+  let tns = { dollar: 0, bigDollar: 0 }; // T&S thresholds
   let loadingTimer = null;
   let waitingForData = false;
   let activeSymbol = '';
@@ -57,6 +66,10 @@
       }
       soundURL = cfg.soundURL || '';
       soundAvailable = !!cfg.soundAvailable;
+      globalSilent = !!cfg.silent;
+      if (els.silent) els.silent.checked = globalSilent;
+      tns.dollar = parseInt(cfg.dollarThreshold || 0, 10) || 0;
+      tns.bigDollar = parseInt(cfg.bigDollarThreshold || 0, 10) || 0;
       if (soundAvailable && soundURL) {
         audio = new Audio(soundURL);
         audio.preload = 'auto';
@@ -98,6 +111,39 @@
     }
     beepFallback();
   }
+  // ---- T&S audio (TickSonic-like) ----
+  const TS_AUDIO = {
+    urls: {
+      above_ask: "/sounds/above_ask.wav",
+      below_bid: "/sounds/below_bid.wav",
+      between   : "/sounds/between_bid_ask.wav",
+      buy       : "/sounds/buy.wav",
+      sell      : "/sounds/sell.wav",
+      u         : "/sounds/letter_u.wav",
+      d         : "/sounds/letter_d.wav",
+    },
+    engine: null, ready: false
+  };
+  class Mixer {
+    constructor(map){ this.map = map; this.ctx=null; this.buffers=new Map(); this.gain=null; this.active=[]; }
+    async init(){
+      const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return false;
+      this.ctx = new AC(); this.gain = this.ctx.createGain(); this.gain.connect(this.ctx.destination);
+      for (const [k,u] of Object.entries(this.map)) {
+        try { const resp = await fetch(u, {cache:"force-cache"}); const buf=await resp.arrayBuffer();
+              this.buffers.set(k, await this.ctx.decodeAudioData(buf)); } catch {}
+      }
+      return this.buffers.size>0;
+    }
+    async resume(){ if(this.ctx && this.ctx.state==="suspended") try{ await this.ctx.resume(); }catch{} }
+    play(k, rate=1){ if(globalSilent) return; const b=this.buffers.get(k); if(!b) return;
+      const s=this.ctx.createBufferSource(); s.buffer=b; s.playbackRate.value=rate; s.connect(this.gain); s.start();
+      this.active.push(s); s.onended=()=>{ const i=this.active.indexOf(s); if(i>=0) this.active.splice(i,1); };
+    }
+    stop(){ for(const s of this.active){ try{s.stop(0);}catch{} } this.active.length=0; }
+  }
+  (async () => { const m = new Mixer(TS_AUDIO.urls); TS_AUDIO.ready = await m.init(); TS_AUDIO.engine = m; })();
+  function tsPlay(key, rate=1){ if(!TS_AUDIO.ready) return; TS_AUDIO.engine.play(key, rate); }
   function showLoadingState() {
     const make = (tbody) => {
       tbody.innerHTML = '';
@@ -156,7 +202,11 @@
         } else if (msg.type === 'alert') {
           appendAlert(msg.data);
           pulseRowForAlert(msg.data);
-          playSound();
+          if (!globalSilent) playSound(); // reuse existing alert beep, honor global mute
+        } else if (msg.type === 'quote') {
+          onTSQuote(msg);
+        } else if (msg.type === 'trade') {
+          onTSTrade(msg);
         } else if (msg.type === 'error') {
           // MODIFIED: Ignore harmless Error 310
           if (!msg.data.message.includes('Error 310')) {
@@ -330,6 +380,51 @@
     el.textContent = `Error: ${msg}`;
     prependLogItem(el);
   }
+  function fmt2(x){ return (Number.isFinite(+x)?(+x).toFixed(2):'—'); }
+  function onTSQuote(q){
+    const { bid, ask } = q;
+    if (els.tapeBid && bid!=null) els.tapeBid.textContent = fmt2(bid);
+    if (els.tapeAsk && ask!=null) els.tapeAsk.textContent = fmt2(ask);
+    if (els.tapeSpread && bid!=null && ask!=null) els.tapeSpread.textContent = fmt2(ask - bid);
+  }
+  function tsRow(ev){
+    const row = document.createElement('div');
+    row.className = 'row' + (ev.big ? ' big' : '');
+    const colorClass = {
+      "above_ask":"col-yellow","at_ask":"col-green","between_mid":"col-white",
+      "between_ask":"col-white","between_bid":"col-white","at_bid":"col-red","below_bid":"col-magenta"
+    }[ev.side] || "col-white";
+    const priceStr = fmt2(ev.price);
+    row.innerHTML = `
+      <div class="left">
+        <span class="badge ${colorClass}">${ev.side.replace('_',' ')}</span>
+        <span class="price ${colorClass}">${priceStr}</span>
+        <span class="amt">$${ev.amountStr || ''}</span>
+      </div>
+      <div class="time">${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>
+      <div class="sym">${ev.sym || activeSymbol || ''}</div>`;
+    return row;
+  }
+  function onTSTrade(ev){
+    if (!els.tape) return;
+    // append and keep scrolled to bottom (TickSonic style)
+    const atBottom = (els.tape.scrollTop + els.tape.clientHeight + 4) >= els.tape.scrollHeight;
+    els.tape.appendChild(tsRow(ev));
+    while (els.tape.childElementCount > 1000) els.tape.removeChild(els.tape.firstElementChild);
+    if (atBottom) els.tape.scrollTop = els.tape.scrollHeight;
+    // sound (mute respected)
+    if (globalSilent || !TS_AUDIO.ready) return;
+    const big = !!ev.big;
+    switch (ev.side){
+      case "above_ask":   tsPlay("above_ask", big?1.5:1.0); break;
+      case "at_ask":      tsPlay("buy",       big?1.5:1.0); break;
+      case "between_mid": tsPlay("between",   1.0); break;
+      case "between_ask": tsPlay("u",         1.0); break;
+      case "between_bid": tsPlay("d",         1.0); break;
+      case "at_bid":      tsPlay("sell",      big?0.85:1.0); break;
+      case "below_bid":   tsPlay("below_bid", big?0.85:1.0); break;
+    }
+  }
   async function start() {
     const symbol = (els.sym.value || '').trim().toUpperCase(); // Uppercase symbol
     if (!symbol) {
@@ -337,10 +432,23 @@
       return;
     }
     const threshold = parseInt(els.thr.value || '0', 10);
+    // Dollar combobox stores a JSON blob or a numeric threshold; accept both
+    let dollar = 0, bigDollar = 0;
+    try {
+      const raw = els.dollarHidden ? els.dollarHidden.value : "";
+      if (raw && raw.trim().startsWith("{")) {
+        const j = JSON.parse(raw);
+        dollar = parseInt(j.threshold || 0, 10) || 0;
+        bigDollar = parseInt(j.big_threshold || 0, 10) || 0;
+      } else if (raw) {
+        dollar = parseInt(raw, 10) || 0;
+      }
+    } catch {}
     const res = await fetch('/api/start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ symbol, threshold, side: currentSide() })
+      body: JSON.stringify({ symbol, threshold, side: currentSide(),
+                             dollar, bigDollar, silent: !!(els.silent && els.silent.checked) })
     });
     if (!res.ok) {
       const txt = await res.text();
@@ -401,6 +509,12 @@
   els.start.addEventListener('click', start);
   els.stop.addEventListener('click', stop);
   els.test.addEventListener('click', () => playSound());
+  if (els.silent) {
+    els.silent.addEventListener('change', async () => {
+      globalSilent = !!els.silent.checked;
+      try { await fetch('/api/silent', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({silent: globalSilent})}); } catch {}
+    });
+  }
   els.sym.addEventListener('keydown', (e) => { if (e.key === 'Enter') start(); });
   els.thr.addEventListener('keydown', (e) => { if (e.key === 'Enter') updateThreshold(); });
   els.thr.addEventListener('change', updateThreshold);
