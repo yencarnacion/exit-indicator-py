@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Dict, Set, Optional
 from math import isfinite
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
@@ -21,7 +22,6 @@ DEBUG = False
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "./config.tws.yaml")
 cfg = Config.load(CONFIG_PATH)
-app = FastAPI()
 
 # --- T&S focused debug switch (env or config) ---
 def _is_true(x) -> bool:
@@ -54,13 +54,15 @@ manager = IBDepthManager(
     on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
     on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
 )
+
 # --- lifecycle ---
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     asyncio.create_task(manager.run())
-@app.on_event("shutdown")
-async def _shutdown():
+    yield
     await manager.stop()
+
+app = FastAPI(lifespan=lifespan)
 # --- static assets (serve existing ./web) ---
 WEB_DIR = Path("web")
 @app.get("/", include_in_schema=False)
