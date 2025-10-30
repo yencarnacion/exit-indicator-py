@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Optional, Tuple, List
 import os
 from ib_async import IB, Stock, util, Contract, Ticker, DOMLevel
@@ -274,9 +274,29 @@ class IBDepthManager:
     def _convert_dom(rows: List[DOMLevel], side: str) -> List[DepthLevel]:
         out: List[DepthLevel] = []
         for i, r in enumerate(rows or []):
-            try: price = Decimal(str(r.price))
-            except: continue
-            size = int(r.size or 0)
+            price_raw = getattr(r, "price", None)
+            size_raw = getattr(r, "size", 0)
+            # Validate price
+            try:
+                if isinstance(price_raw, Decimal):
+                    price = price_raw
+                else:
+                    if price_raw is None:
+                        continue
+                    if isinstance(price_raw, float) and util.isNan(price_raw):
+                        continue
+                    price = Decimal(str(price_raw))
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+            if not price.is_finite() or price <= 0:
+                continue
+            # Validate size
+            try:
+                size = int(size_raw or 0)
+            except (ValueError, TypeError):
+                continue
+            if size <= 0:
+                continue
             venue = getattr(r, "mm", "") or "SMART"
             out.append(DepthLevel(side=side, price=price, size=size, venue=venue, level=i))
         return out
@@ -329,4 +349,3 @@ class IBDepthManager:
             log_debug(f"TBT pump crashed: {e}")
         finally:
             log_debug("TBT pump stopped.")
-

@@ -41,3 +41,27 @@ def test_aggregate_top10_side_specific():
     book, alerts = aggregate_top10(s, asks, bids)
     assert book[0].sumShares == 2100
     assert len(alerts) == 1 and alerts[0].side == "BID"
+
+
+def test_aggregate_skips_non_positive_levels():
+    s = State(cooldown_seconds=0.0, default_threshold=100)
+    s.set_side("ASK")
+    asks = [
+        _mk("ASK", 0, 500),
+        _mk("ASK", 101.50, 0),
+        _mk("ASK", 101.75, -50),
+        _mk("ASK", 101.80, 1000),
+    ]
+    bids = [
+        _mk("BID", 101.60, 0),
+        _mk("BID", 101.40, -200),
+        _mk("BID", 101.20, 900),
+    ]
+
+    ask_book, bid_book, alerts, best_ask, best_bid = aggregate_both_top10(s, asks, bids)
+
+    assert best_ask == Decimal("101.80")
+    assert best_bid == Decimal("101.20")
+    assert ask_book[0].sumShares == 1000
+    assert bid_book[0].sumShares == 900
+    assert alerts, "Valid level should still trigger alerts when threshold met"

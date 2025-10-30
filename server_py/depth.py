@@ -39,6 +39,10 @@ def _aggregate_for_side(
     for r in rows:
         if r.side != side:
             continue
+        if r.size <= 0:
+            continue
+        if not r.price.is_finite() or r.price <= 0:
+            continue
         k = _price_key(r.price)
         sums[k] = sums.get(k, 0) + int(r.size)
         pmap[k] = pmap.get(k, r.price)
@@ -82,6 +86,10 @@ def aggregate_top10(state: State, asks: List[DepthLevel], bids: List[DepthLevel]
     pmap: Dict[str, Decimal] = {}
     for r in rows:
         if r.side != side:
+            continue
+        if r.size <= 0:
+            continue
+        if not r.price.is_finite() or r.price <= 0:
             continue
         k = _price_key(r.price)
         sums[k] = sums.get(k, 0) + int(r.size)
