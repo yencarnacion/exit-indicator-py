@@ -611,6 +611,8 @@
       this.lineColor = cssVar('--obi-line', '#ffcc00');
       this.gridColor = cssVar('--obi-grid', '#223149');
       this.zeroColor = cssVar('--obi-zero', '#485a70');
+      this.posColor  = cssVar('--obi-line-pos', '#2ecc71'); // NEW
+      this.negColor  = cssVar('--obi-line-neg', '#ff6b6b'); // NEW
       this.dpr = 1;
       this.resize();
       window.addEventListener('resize', () => { this.resize(); this.draw(); });
@@ -657,23 +659,67 @@
       // series
       if (this.len > 0) {
         const n = this.len;
-        const dx = innerW / (this.max - 1);               // fixed step → right-aligned scroll
+        const dx = innerW / (this.max - 1);          // fixed step → right-aligned scroll
         let x0 = W - pad - (n - 1) * dx;
         if (x0 < pad) x0 = pad;
         const start = (this.head - n + this.max) % this.max;
-        ctx.strokeStyle = this.lineColor;
-        ctx.lineWidth = 1.6;                              // crisp but visible
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
+
+        const POS_T = 0.10, NEG_T = -0.10;          // thresholds for coloring
+
+        const idx = (i) => (start + i) % this.max;
+        const regionColor = (v) => {
+          if (v > POS_T) return this.posColor;
+          if (v < NEG_T) return this.negColor;
+          return this.lineColor;
+        };
+
+        const drawSeg = (xA, yA, vA, xB, yB, vB, color) => {
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(xA, yA);
+          ctx.lineTo(xB, yB);
+          ctx.stroke();
+        };
+
+        ctx.lineWidth  = 1.6;
+        ctx.lineCap    = 'round';
+        ctx.lineJoin   = 'round';
         ctx.globalAlpha = 1.0;
-        ctx.beginPath();
-        for (let i = 0; i < n; i++) {
-          const v = this.data[(start + i) % this.max];
-          const x = x0 + i * dx;
-          const y = mapY(v);
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+
+        // For each consecutive pair of points, draw one or more tiny segments,
+        // splitting exactly at crossings of -0.10 and +0.10.
+        for (let i = 1; i < n; i++) {
+          const v0 = this.data[idx(i - 1)];
+          const v1 = this.data[idx(i)];
+          const xA = x0 + (i - 1) * dx, yA = mapY(v0);
+          const xB = x0 + i * dx,       yB = mapY(v1);
+
+          // Build a list of split points at threshold crossings (at most 2).
+          const pts = [{ x: xA, y: yA, v: v0 }];
+
+          const maybeAddCross = (thr) => {
+            const a = v0, b = v1;
+            // Detect crossing of 'thr' in either direction (exclude identical both-sides cases).
+            if ((a < thr && b >= thr) || (a > thr && b <= thr)) {
+              const t = (thr - a) / (b - a);           // 0..1 along the segment
+              const xc = xA + t * (xB - xA);
+              pts.push({ x: xc, y: mapY(thr), v: thr });
+            }
+          };
+
+          maybeAddCross(NEG_T);
+          maybeAddCross(POS_T);
+
+          pts.push({ x: xB, y: yB, v: v1 });
+          pts.sort((p, q) => p.x - q.x);               // ensure left→right
+
+          // Draw each sub‑segment in its regime color
+          for (let j = 1; j < pts.length; j++) {
+            const p0 = pts[j - 1], p1 = pts[j];
+            const mid = (p0.v + p1.v) * 0.5;           // safe to pick color by midpoint
+            drawSeg(p0.x, p0.y, p0.v, p1.x, p1.y, p1.v, regionColor(mid));
+          }
         }
-        ctx.stroke();
       }
       ctx.restore();
     }

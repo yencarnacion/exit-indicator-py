@@ -16,6 +16,9 @@
   --obi-line: #ffcc00;   /* bright yellow; change to #e6edf3 (white) or #d96eff (magenta) if you prefer */
   --obi-grid: #223149;   /* faint grid/bounds */
   --obi-zero: #485a70;   /* zero line */
+  /* NEW: distinct colors outside the band */
+  --obi-line-pos: #2ecc71; /* > +0.10 */
+  --obi-line-neg: #ff6b6b; /* < -0.10 */
 }
 
 * { box-sizing: border-box; }
