@@ -17,6 +17,8 @@ from .sound import sound_info
 from .depth import aggregate_top10, aggregate_both_top10, AggregatedLevel, AlertEvent, DepthLevel
 from .ib_client import IBConfig, IBDepthManager
 from .obi import compute_obi, choose_alpha_heuristic
+from .recording import NDJSONRecorder
+from .replay import PlaybackManager, ReplayConfig
 
 # Debug flag: Set to True to enable detailed debug logging
 DEBUG = False
@@ -46,15 +48,36 @@ ws_clients: Set[WebSocket] = set()
 ws_lock = asyncio.Lock()
 # Sound
 _snd = sound_info(cfg.sound_file)
-# IB manager
-manager = IBDepthManager(
-    IBConfig(host=cfg.ib_host, port=cfg.ib_port, client_id=cfg.ib_client_id, smart_depth=cfg.smart_depth),
-    on_status=lambda c: asyncio.create_task(broadcast_status(c)),
-    on_snapshot=lambda sym, asks, bids: asyncio.create_task(on_dom_snapshot(sym, asks, bids)),
-    on_error=lambda msg: asyncio.create_task(broadcast_error(msg)),
-    on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
-    on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
-)
+
+# Recording setup
+REC_PATH = os.getenv("EI_RECORD_TO", "").strip()
+REPLAY_FROM = os.getenv("EI_REPLAY_FROM", "").strip()
+REPLAY_RATE = float(os.getenv("EI_REPLAY_RATE", "1.0"))
+REPLAY_LOOP = os.getenv("EI_REPLAY_LOOP", "0").lower() in ("1","true","yes","on")
+
+recorder: NDJSONRecorder | None = None
+if REC_PATH:
+    recorder = NDJSONRecorder(REC_PATH, meta={"started_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())})
+
+# Manager: choose live vs playback
+if REPLAY_FROM:
+    manager = PlaybackManager(
+        ReplayConfig(path=REPLAY_FROM, rate=REPLAY_RATE, loop=REPLAY_LOOP),
+        on_status=lambda c: asyncio.create_task(broadcast_status(c)),
+        on_snapshot=lambda sym, asks, bids: asyncio.create_task(on_dom_snapshot(sym, asks, bids)),
+        on_error=lambda msg: asyncio.create_task(broadcast_error(msg)),
+        on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
+        on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
+    )
+else:
+    manager = IBDepthManager(
+        IBConfig(host=cfg.ib_host, port=cfg.ib_port, client_id=cfg.ib_client_id, smart_depth=cfg.smart_depth),
+        on_status=lambda c: asyncio.create_task(broadcast_status(c)),
+        on_snapshot=lambda sym, asks, bids: asyncio.create_task(on_dom_snapshot(sym, asks, bids)),
+        on_error=lambda msg: asyncio.create_task(broadcast_error(msg)),
+        on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
+        on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
+    )
 
 # --- lifecycle ---
 @asynccontextmanager
@@ -62,6 +85,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(manager.run())
     yield
     await manager.stop()
+    if recorder:
+        await recorder.close()
 
 app = FastAPI(lifespan=lifespan)
 # --- static assets (serve existing ./web) ---
@@ -358,6 +383,8 @@ async def broadcast_error(msg: str):
         await broadcast({"type": "error", "data": {"message": msg}})
 # --- DOM → aggregation glue ---
 async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthLevel]):
+    if recorder:
+        recorder.record_depth(symbol, asks, bids)
     if DEBUG:
         print(f"DEBUG: on_dom_snapshot received data. Symbol: {symbol}, Current state symbol: {state.symbol}")
     # Ignore snapshots for stale symbols
@@ -430,12 +457,16 @@ _last_ask: Optional[float] = None
 
 async def broadcast_quote(bid: float | None, ask: float | None):
     global _last_bid, _last_ask
+    if recorder:
+        recorder.record_quote(bid, ask)
     if bid is not None: _last_bid = bid
     if ask is not None: _last_ask = ask
     tns_log(f"QUOTE bid={bid} ask={ask} (last_bid={_last_bid} last_ask={_last_ask})")
     await broadcast({"type": "quote", "bid": bid, "ask": ask, "timeISO": None})
 
 async def broadcast_trade(ev: dict):
+    if recorder:
+        recorder.record_trade(ev)
     # Pull inputs
     sym = state.symbol or ev.get("sym") or ""
     price = float(ev.get("price") or 0.0)
