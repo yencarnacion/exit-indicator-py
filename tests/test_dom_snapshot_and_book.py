@@ -43,3 +43,7 @@ async def test_on_dom_snapshot_broadcasts_full_book(app_module, capture_broadcas
     assert data["stats"]["bestBid"] == pytest.approx(99.99)
     assert data["stats"]["last"] == pytest.approx(123.45)
     assert data["stats"]["volume"] == 987654
+    # OBI is computed over top levels and should be ask-dominant (negative) here
+    obi = data["stats"].get("obi", None)
+    assert obi is not None and -1.0 <= obi <= 1.0, f"OBI missing or out of range: {data['stats']}"
+    assert obi < 0, f"Expected ask-dominant OBI (<0); got {obi}"

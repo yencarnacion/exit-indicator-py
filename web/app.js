@@ -321,6 +321,7 @@
   function updateStats(s) {
     const fmtP = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
     const fmtV = (x) => (Number.isFinite(+x) ? Number(x).toLocaleString() : '—');
+    const fmtOBI = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
     const bb = (s.bestBid != null) ? +s.bestBid : null;
     const ba = (s.bestAsk != null) ? +s.bestAsk : null;
     const sp = (bb != null && ba != null) ? (ba - bb) : null;
@@ -329,6 +330,26 @@
     if (els.spread)  els.spread.textContent  = fmtP(sp);
     if (els.last)    els.last.textContent    = fmtP(s.last);
     if (els.vol)     els.vol.textContent     = fmtV(s.volume);
+    // OBI (−1..+1): quick mean-reversion read
+    const obiEl = document.getElementById('obiVal');
+    if (obiEl) {
+      const val = (s.obi != null) ? +s.obi : NaN;
+      obiEl.classList.remove('pos', 'neg', 'flat');
+      obiEl.textContent = fmtOBI(val);
+      if (!Number.isFinite(val)) {
+        obiEl.classList.add('flat');
+      } else if (val > 0.05) {
+        obiEl.classList.add('pos');
+      } else if (val < -0.05) {
+        obiEl.classList.add('neg');
+      } else {
+        obiEl.classList.add('flat');
+      }
+      // Optional tiny hint with α and L (in a title)
+      const a = (s.obiAlpha != null) ? Number(s.obiAlpha).toFixed(2) : 'auto';
+      const L = (s.obiLevels != null) ? s.obiLevels : '—';
+      obiEl.title = `OBI (α=${a}, L=${L})`;
+    }
   }
 
   // --- Log utilities (newest at top + stable scroll) ---

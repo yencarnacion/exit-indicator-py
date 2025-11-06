@@ -108,13 +108,18 @@ button.secondary { background: #203047; color: #dbe6f2; }
 /* --- Two-panel order book --- */
 .book-stats {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
 .stat { background: #0e1522; border: 1px solid #1b2737; border-radius: 6px; padding: 8px 10px; }
 .stat-label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 2px; }
 .stat-val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+/* OBI coloring for quick mean reversion read */
+.stat .pos { color: var(--good); }
+.stat .neg { color: var(--danger); }
+.stat .flat { color: var(--muted); }
 
 .book-panels {
   display: grid;

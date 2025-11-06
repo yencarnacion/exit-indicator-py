@@ -16,6 +16,7 @@ from .state import State
 from .sound import sound_info
 from .depth import aggregate_top10, aggregate_both_top10, AggregatedLevel, AlertEvent, DepthLevel
 from .ib_client import IBConfig, IBDepthManager
+from .obi import compute_obi, choose_alpha_heuristic
 
 # Debug flag: Set to True to enable detailed debug logging
 DEBUG = False
@@ -225,6 +226,12 @@ def api_config():
         "dollarThreshold": state.dollar_threshold,
         "bigDollarThreshold": state.big_dollar_threshold,
         "soundsPath": "/sounds/",  # base for ticksonic wavs
+        # OBI indicator config
+        "obi": {
+            "enabled": bool(getattr(cfg, "obi_enabled", True)),
+            "alpha": getattr(cfg, "obi_alpha", None),
+            "levelsMax": getattr(cfg, "obi_levels_max", 3),
+        },
     }
 @app.post("/api/start")
 async def api_start(req: StartReq):
@@ -315,7 +322,10 @@ async def broadcast_book(levels: list[AggregatedLevel], side: str):
 
 async def broadcast_book_full(
     asks: list[AggregatedLevel], bids: list[AggregatedLevel],
-    best_ask, best_bid, last, volume
+    best_ask, best_bid, last, volume,
+    obi: float | None = None,
+    obi_alpha: float | None = None,
+    obi_levels: int | None = None,
 ):
     tolist = lambda arr: [{"price": float(l.price), "sumShares": l.sumShares, "rank": l.rank} for l in arr]
     stats = {
@@ -324,6 +334,9 @@ async def broadcast_book_full(
         "spread": (float(best_ask - best_bid) if (best_ask is not None and best_bid is not None) else None),
         "last": (float(last) if last is not None else None),
         "volume": int(volume) if volume is not None else None,
+        "obi": float(obi) if obi is not None else None,
+        "obiAlpha": float(obi_alpha) if obi_alpha is not None else None,
+        "obiLevels": int(obi_levels) if obi_levels is not None else None,
     }
     await broadcast({
         "type": "book",
@@ -357,8 +370,25 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
         print(f"DEBUG: Aggregated both books. Asks: {len(ask_book)}, Bids: {len(bid_book)}, Alerts: {len(alerts)}")
     # Pull last/volume from IB manager
     last, volume = manager.current_quote()
+    # --- OBI computation (top ≤3 levels per side) ---
+    obi_val = None
+    obi_alpha_used = None
+    obi_levels_used = None
+    if getattr(cfg, "obi_enabled", True) and ask_book and bid_book:
+        levels_avail = min(len(ask_book), len(bid_book))
+        L = max(0, min(getattr(cfg, "obi_levels_max", 3), 3, levels_avail))
+        if L > 0:
+            qb = [bid_book[i].sumShares for i in range(L)]
+            qa = [ask_book[i].sumShares for i in range(L)]
+            # Respect explicit alpha if provided; otherwise heuristic
+            alpha_cfg = getattr(cfg, "obi_alpha", None)
+            obi_alpha_used = (float(alpha_cfg) if isinstance(alpha_cfg, (int, float)) else
+                              choose_alpha_heuristic(qb, qa))
+            obi_val = compute_obi(qb, qa, obi_alpha_used)
+            obi_levels_used = L
     if ask_book or bid_book:
-        await broadcast_book_full(ask_book, bid_book, best_ask, best_bid, last, volume)
+        await broadcast_book_full(ask_book, bid_book, best_ask, best_bid, last, volume,
+                                  obi=obi_val, obi_alpha=obi_alpha_used, obi_levels=obi_levels_used)
     for a in alerts:
         await broadcast_alert(a)
 
