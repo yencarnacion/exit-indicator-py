@@ -12,6 +12,10 @@
   --bar-warn: #e3a93d;
   --bar-hot: #e0792f;
   --bar-danger: #e44c4c;
+  /* OBI mini chart palette (science-friendly high contrast on dark) */
+  --obi-line: #ffcc00;   /* bright yellow; change to #e6edf3 (white) or #d96eff (magenta) if you prefer */
+  --obi-grid: #223149;   /* faint grid/bounds */
+  --obi-zero: #485a70;   /* zero line */
 }
 
 * { box-sizing: border-box; }
@@ -159,6 +163,22 @@ body.compact .col-rank { display: none; }
 body.compact .alerts .log { max-height: 180px; }
 body.compact .book-stats { gap: 6px; }
 body.compact .stat { padding: 6px 8px; }
+
+/* --- OBI mini chart (sparkline) --- */
+.obi-mini {
+  background: #0e1522;
+  border: 1px solid #1b2737;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 12px;
+}
+.obi-mini canvas {
+  display: block;
+  width: 100%;
+  height: 44px;         /* small but readable */
+}
+body.compact .obi-mini { padding: 4px 6px; }
+body.compact .obi-mini canvas { height: 30px; }  /* tighter in compact mode */
 
 /* --- Combobox (shared by Ticker and Threshold) --- */
 .combo { position: relative; }

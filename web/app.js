@@ -25,6 +25,8 @@
     silent: document.getElementById('silentToggle'),
     dollarHidden: document.getElementById('dollarHidden'),
   };
+  // --- OBI mini chart handle ---
+  let obiChart = null;
   let ws;
   let audio;
   let audioReady = false;
@@ -350,6 +352,11 @@
       const L = (s.obiLevels != null) ? s.obiLevels : '—';
       obiEl.title = `OBI (α=${a}, L=${L})`;
     }
+    // Feed the mini chart (only when we have a number)
+    if (obiChart && s.obi != null && Number.isFinite(+s.obi)) {
+      obiChart.push(+s.obi);
+      obiChart.draw();
+    }
   }
 
   // --- Log utilities (newest at top + stable scroll) ---
@@ -583,5 +590,99 @@
     }
   });
   // Boot
-  initConfig().then(connectWS);
+  initConfig().then(() => {
+    initObiMiniChart();
+    connectWS();
+  });
+
+  // --------- OBI mini chart implementation ----------
+  function cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  }
+  class ObiMiniChart {
+    constructor(canvas, opts = {}) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d');
+      this.max = opts.maxPoints || 360;           // ~last few hundred ticks
+      this.data = new Float32Array(this.max);
+      this.len = 0;
+      this.head = 0;                               // ring buffer head
+      this.lineColor = cssVar('--obi-line', '#ffcc00');
+      this.gridColor = cssVar('--obi-grid', '#223149');
+      this.zeroColor = cssVar('--obi-zero', '#485a70');
+      this.dpr = 1;
+      this.resize();
+      window.addEventListener('resize', () => { this.resize(); this.draw(); });
+    }
+    push(v) {
+      const val = Math.max(-1, Math.min(1, Number(v)));
+      this.data[this.head] = val;
+      this.head = (this.head + 1) % this.max;
+      this.len = Math.min(this.len + 1, this.max);
+    }
+    resize() {
+      const rect = this.canvas.getBoundingClientRect();
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      this.dpr = dpr;
+      // set backing store size for crisp lines on HiDPI
+      this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    }
+    draw() {
+      const ctx = this.ctx;
+      const dpr = this.dpr;
+      const rect = this.canvas.getBoundingClientRect();
+      const W = rect.width, H = rect.height;
+      ctx.save();
+      ctx.scale(dpr, dpr);               // draw in CSS pixels
+      // clear
+      ctx.clearRect(0, 0, W, H);
+      const pad = 4;                      // small insets to avoid clipping stroke caps
+      const innerW = Math.max(1, W - pad * 2);
+      const innerH = Math.max(1, H - pad * 2);
+      const mapY = (v) => pad + (1 - (v + 1) / 2) * innerH;  // v=+1 -> top, v=-1 -> bottom
+      // bounds: ±1
+      ctx.strokeStyle = this.gridColor;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.75;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(pad, mapY(+1)); ctx.lineTo(W - pad, mapY(+1)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(pad, mapY(-1)); ctx.lineTo(W - pad, mapY(-1)); ctx.stroke();
+      // zero line
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.95;
+      ctx.strokeStyle = this.zeroColor;
+      ctx.beginPath(); ctx.moveTo(pad, mapY(0)); ctx.lineTo(W - pad, mapY(0)); ctx.stroke();
+      // series
+      if (this.len > 0) {
+        const n = this.len;
+        const dx = innerW / (this.max - 1);               // fixed step → right-aligned scroll
+        let x0 = W - pad - (n - 1) * dx;
+        if (x0 < pad) x0 = pad;
+        const start = (this.head - n + this.max) % this.max;
+        ctx.strokeStyle = this.lineColor;
+        ctx.lineWidth = 1.6;                              // crisp but visible
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.globalAlpha = 1.0;
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+          const v = this.data[(start + i) % this.max];
+          const x = x0 + i * dx;
+          const y = mapY(v);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+  function initObiMiniChart() {
+    const c = document.getElementById('obiMiniCanvas');
+    if (!c) return;
+    obiChart = new ObiMiniChart(c, { maxPoints: 360 });
+    // draw an empty grid immediately (nice skeleton on load)
+    obiChart.draw();
+  }
 })();
