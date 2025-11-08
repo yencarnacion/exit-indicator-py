@@ -229,6 +229,10 @@ class SideReq(BaseModel):
     side: str
 class SilentReq(BaseModel):
     silent: bool
+
+class MicroVWAPReq(BaseModel):
+    minutes: float
+    band_k: float
 # --- API routes ---
 @app.get("/api/health")
 def api_health():
@@ -301,6 +305,22 @@ async def api_silent(req: SilentReq):
     state.set_silent(req.silent)
     tns_log(f"POST /api/silent => {state.silent}")
     return {"ok": True, "silent": state.silent}
+
+@app.post("/api/microvwap")
+async def api_microvwap(req: MicroVWAPReq):
+    """
+    Configure micro-VWAP window (minutes) and band multiplier k.
+    Keeps logic on server so stats + hints match the UI.
+    """
+    minutes = max(0.5, min(float(req.minutes), 60.0))  # clamp 0.5–60 min
+    band_k = max(0.5, min(float(req.band_k), 4.0))     # clamp 0.5–4σ
+    # Persist on manager if supported
+    if hasattr(manager, "set_micro_window_minutes"):
+        manager.set_micro_window_minutes(minutes)
+    # Store band_k on manager in a generic way
+    setattr(manager, "_micro_band_k", band_k)
+    tns_log(f"POST /api/microvwap => minutes={minutes} band_k={band_k}")
+    return {"ok": True, "minutes": minutes, "band_k": band_k}
 # --- WebSocket ---
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -353,6 +373,47 @@ async def broadcast_book_full(
     obi_levels: int | None = None,
 ):
     tolist = lambda arr: [{"price": float(l.price), "sumShares": l.sumShares, "rank": l.rank} for l in arr]
+    # micro VWAP (from manager, if available)
+    micro_vwap = None
+    micro_sigma = None
+    try:
+        if hasattr(manager, "_micro_vwap_and_sigma"):
+            micro_vwap, micro_sigma = manager._micro_vwap_and_sigma()
+    except Exception:
+        micro_vwap, micro_sigma = None, None
+
+    # Simple action hint: compact, mutually exclusive, glanceable
+    def _compute_action_hint():
+        px = last if last is not None else (best_bid + best_ask) / 2 if (best_bid and best_ask) else None
+        if px is None or micro_vwap is None:
+            return None
+        # band multiplier from manager (set via /api/microvwap), default 2σ
+        k = float(getattr(manager, "_micro_band_k", 2.0) or 2.0)
+        band = (micro_sigma or 0.0) * k
+        if band <= 0:
+            return None
+        dist = px - micro_vwap
+        # Normalize for stability
+        # Rough thresholds: significant extension when |dist| > band
+        # Use OBI to gate "ok to fade" vs "trend".
+        o = obi if obi is not None else 0.0
+
+        # Long fade ok: below lower band, selling not dominant
+        if dist <= -band and o > -0.1:
+            return "long_ok"
+        # Short fade ok: above upper band, buying not dominant
+        if dist >= band and o < 0.1:
+            return "fade_short_ok"
+        # Trend up: above band with strong bid/OBI
+        if dist >= band and o >= 0.3:
+            return "trend_up"
+        # Trend down: below band with strong ask/OBI
+        if dist <= -band and o <= -0.3:
+            return "trend_down"
+        return None
+
+    action_hint = _compute_action_hint()
+
     stats = {
         "bestBid": float(best_bid) if best_bid is not None else None,
         "bestAsk": float(best_ask) if best_ask is not None else None,
@@ -362,6 +423,10 @@ async def broadcast_book_full(
         "obi": float(obi) if obi is not None else None,
         "obiAlpha": float(obi_alpha) if obi_alpha is not None else None,
         "obiLevels": int(obi_levels) if obi_levels is not None else None,
+        "microVWAP": float(micro_vwap) if micro_vwap is not None else None,
+        "microSigma": float(micro_sigma) if micro_sigma is not None else None,
+        "microBandK": float(getattr(manager, "_micro_band_k", 2.0)),
+        "actionHint": action_hint,
     }
     await broadcast({
         "type": "book",

@@ -172,8 +172,12 @@ body.compact .stat { padding: 6px 8px; }
   background: #0e1522;
   border: 1px solid #1b2737;
   border-radius: 6px;
-  padding: 6px 8px;
-  margin-bottom: 12px;
+  padding: 4px 6px;
+  margin-bottom: 10px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 6px;
 }
 .obi-mini canvas {
   display: block;
@@ -182,6 +186,33 @@ body.compact .stat { padding: 6px 8px; }
 }
 body.compact .obi-mini { padding: 4px 6px; }
 body.compact .obi-mini canvas { height: 30px; }  /* tighter in compact mode */
+
+/* Action hint pill: single, high-salience signal */
+.signal-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #0b0f14;
+  background: #485a70;
+  white-space: nowrap;
+}
+.signal-pill.long-ok {
+  background: #2ecc71;
+  color: #02130a;
+}
+.signal-pill.fade-short-ok {
+  background: #ff6b6b;
+  color: #1a0000;
+}
+.signal-pill.trend-up {
+  background: #ffd166; /* yellow */
+  color: #201400;
+}
+.signal-pill.trend-down {
+  background: #d96eff; /* magenta */
+  color: #150019;
+}
 
 /* --- Combobox (shared by Ticker and Threshold) --- */
 .combo { position: relative; }

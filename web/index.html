@@ -119,6 +119,37 @@
         </label>
       </div>
 
+      <!-- Micro VWAP controls: window + band k -->
+      <div class="field">
+        <label for="microVwapVisInput">µVWAP Window (min)</label>
+        <input id="microVwapHidden" type="hidden" value="5"/>
+        <div class="combo" id="microVwapCombo" role="combobox" aria-haspopup="listbox" aria-expanded="false" data-max-selected="1">
+          <div class="tokenbox" id="microVwapTokenbox">
+            <input
+              id="microVwapVisInput"
+              class="combo-input"
+              type="text"
+              placeholder="2, 5, 10, 15 or type"
+              inputmode="numeric"
+              autocomplete="off"
+              aria-autocomplete="list"
+              aria-controls="microVwapListbox"
+              aria-activedescendant=""
+            />
+          </div>
+          <div id="microVwapListbox" class="dropdown" role="listbox" tabindex="-1" aria-label="µVWAP window options"></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="microBandSelect">Band σ</label>
+        <select id="microBandSelect">
+          <option value="1">1σ</option>
+          <option value="1.5">1.5σ</option>
+          <option value="2" selected>2σ</option>
+        </select>
+      </div>
+
       <div class="buttons">
         <button id="startBtn">Subscribe</button>
         <button id="stopBtn" class="secondary">Stop</button>
@@ -138,10 +169,15 @@
           <span class="stat-label">OBI</span>
           <span class="stat-val" id="obiVal">—</span>
         </div>
+        <div class="stat" title="Micro VWAP ± k·σ (current micro-fair value)">
+          <span class="stat-label">µVWAP</span>
+          <span class="stat-val" id="microVwapVal">—</span>
+        </div>
       </div>
 
       <!-- OBI mini chart (−1..+1), compact and high-contrast -->
       <div class="obi-mini" id="obiMiniWrap" title="OBI (−1..+1) real time">
+        <div class="signal-pill" id="actionHintPill">—</div>
         <canvas id="obiMiniCanvas" aria-label="Order Book Imbalance mini chart" role="img"></canvas>
       </div>
 
@@ -568,6 +604,55 @@
         thresholdCombo.setInitial(initialThr);
       } catch {}
     })();
+
+    // Initialize µVWAP window combo with defaults 2,5,10,15 and freeform add
+    initYamlCombo({
+      comboId: 'microVwapCombo',
+      tokenboxId: 'microVwapTokenbox',
+      inputId: 'microVwapVisInput',
+      listboxId: 'microVwapListbox',
+      hiddenId: 'microVwapHidden',
+      errorId: 'microVwapError', // non-existent; safe no-op
+      fetchUrl: '',               // no server YAML; we seed locally
+      cacheKey: 'ei.microvwap.window',
+      placeholder: '2, 5, 10, 15 or type',
+      normalize: s => String(s).trim().replace(/[, ]+/g,''),
+      isValid: s => /^\d{1,3}$/.test(s),  // minutes
+      keyCandidates: ['value']
+    }).setInitial(5);
+
+    // When µVWAP window selection changes, propagate to server
+    const microHidden = document.getElementById('microVwapHidden');
+    if (microHidden) {
+      microHidden.addEventListener('change', async () => {
+        const minutes = parseFloat(microHidden.value || "5") || 5;
+        const band_k = parseFloat(document.getElementById('microBandSelect')?.value || "2") || 2;
+        try {
+          await fetch('/api/microvwap', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ minutes, band_k })
+          });
+        } catch (e) {
+          console.warn('microVWAP window update failed', e);
+        }
+      });
+    }
+
+    // Notify server when band σ changes (keep microVWAP config aligned mid-session)
+    document.getElementById('microBandSelect').addEventListener('change', async () => {
+      const minutes = parseFloat(document.getElementById('microVwapHidden').value || "5") || 5;
+      const band_k = parseFloat(document.getElementById('microBandSelect').value || "2") || 2;
+      try {
+        await fetch('/api/microvwap', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ minutes, band_k })
+        });
+      } catch (e) {
+        console.warn('microVWAP band update failed', e);
+      }
+    });
   })();
   </script>
 

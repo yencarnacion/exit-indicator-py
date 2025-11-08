@@ -24,6 +24,10 @@
     tapeSpread: document.getElementById('tapeSpread'),
     silent: document.getElementById('silentToggle'),
     dollarHidden: document.getElementById('dollarHidden'),
+    microVwapHidden: document.getElementById('microVwapHidden'),
+    microBandSelect: document.getElementById('microBandSelect'),
+    microVwapVal: document.getElementById('microVwapVal'),
+    actionHintPill: document.getElementById('actionHintPill'),
   };
   // --- OBI mini chart handle ---
   let obiChart = null;
@@ -357,6 +361,44 @@
       obiChart.push(+s.obi);
       obiChart.draw();
     }
+
+    // Micro VWAP + bands (use server-supplied k to stay aligned)
+    if (els.microVwapVal) {
+      const mv = (s.microVWAP != null) ? +s.microVWAP : NaN;
+      const sig = (s.microSigma != null) ? +s.microSigma : NaN;
+      const k = (s.microBandK != null) ? +s.microBandK : (parseFloat(els.microBandSelect?.value || "2") || 2);
+      if (Number.isFinite(mv) && Number.isFinite(sig) && sig > 0) {
+        const lo = mv - k * sig;
+        const hi = mv + k * sig;
+        els.microVwapVal.textContent = `${mv.toFixed(2)} [${lo.toFixed(2)}, ${hi.toFixed(2)}]`;
+      } else if (Number.isFinite(mv)) {
+        els.microVwapVal.textContent = mv.toFixed(2);
+      } else {
+        els.microVwapVal.textContent = '—';
+      }
+    }
+
+    // Action hint pill: mutually exclusive, color-coded
+    if (els.actionHintPill) {
+      const pill = els.actionHintPill;
+      pill.className = 'signal-pill';
+      const hint = s.actionHint;
+      if (hint === 'long_ok') {
+        pill.textContent = 'long ok';
+        pill.classList.add('long-ok');
+      } else if (hint === 'fade_short_ok') {
+        pill.textContent = 'fade short ok';
+        pill.classList.add('fade-short-ok');
+      } else if (hint === 'trend_up') {
+        pill.textContent = 'trend up';
+        pill.classList.add('trend-up');
+      } else if (hint === 'trend_down') {
+        pill.textContent = 'trend down';
+        pill.classList.add('trend-down');
+      } else {
+        pill.textContent = '—';
+      }
+    }
   }
 
   // --- Log utilities (newest at top + stable scroll) ---
@@ -515,6 +557,19 @@
         const out = await res.json();
         activeSymbol = out.symbol || symbol;
       } catch {}
+    }
+
+    // After successful start, push current micro-VWAP settings to server
+    try {
+      const minutes = parseFloat(els.microVwapHidden?.value || "5") || 5;
+      const band_k = parseFloat(els.microBandSelect?.value || "2") || 2;
+      await fetch('/api/microvwap', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ minutes, band_k })
+      });
+    } catch (e) {
+      console.warn('microVWAP config failed', e);
     }
   }
   async function stop() {

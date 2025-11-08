@@ -16,6 +16,9 @@ class DummyManager:
         self.sym = ""
         self._last = None
         self._vol = None
+        # micro VWAP config placeholders
+        self._micro_band_k = 2.0
+        self._micro_window_minutes = 5.0
 
     async def run(self):
         # Keep it as an awaitable so startup doesn't crash.
@@ -32,6 +35,14 @@ class DummyManager:
 
     def current_quote(self):
         return self._last, self._vol
+
+    # Match real manager API used by /api/microvwap
+    def set_micro_window_minutes(self, minutes: float):
+        try:
+            m = float(minutes)
+        except Exception:
+            return
+        self._micro_window_minutes = max(0.5, min(m, 60.0))
 
 
 @pytest.fixture(scope="session")

@@ -58,6 +58,9 @@ class IBDepthManager:
         # tick-by-tick subscription state
         self._tbt_task: Optional[asyncio.Task] = None
         self._tbt_index: int = 0  # per-subscription index for quote_ticker.tickByTicks
+        # --- micro VWAP (time-based window in seconds) ---
+        self._micro_window_sec: float = 300.0  # default 5 minutes; UI can override via API if needed
+        self._micro_trades: List[Tuple[float, float]] = []  # (ts, price); we already gate on size elsewhere
         log_debug("IBDepthManager initialized.")
 
     async def run(self):
@@ -135,6 +138,8 @@ class IBDepthManager:
         self._ticker = None
         self._quote_ticker = None
         self._last_price, self._day_volume = None, None
+        # Reset micro VWAP state
+        self._micro_trades.clear()
         # Detach quote callback from the old quote ticker (avoid leaks)
         if quote_ticker_to_cancel:
             try:
@@ -211,6 +216,9 @@ class IBDepthManager:
                 except: pass
             self._tbt_task = asyncio.create_task(self._pump_tbt())
 
+            # --- Bootstrap micro VWAP from recent historical trades (non-blocking) ---
+            asyncio.create_task(self._bootstrap_micro_vwap())
+
         except Exception as e:
             log_debug(f"CRITICAL ERROR during _subscribe_symbol for '{symbol}': {e}")
             self._on_error(f"Subscribe {symbol}: {e}")
@@ -269,6 +277,70 @@ class IBDepthManager:
 
     def current_quote(self) -> Tuple[Optional[float], Optional[int]]:
         return self._last_price, self._day_volume
+
+    # --- micro VWAP helpers -------------------------------------------------
+
+    def set_micro_window_minutes(self, minutes: float) -> None:
+        """Optional: allow API to override micro VWAP window."""
+        try:
+            m = float(minutes)
+        except Exception:
+            return
+        self._micro_window_sec = max(30.0, min(m * 60.0, 3600.0))  # clamp: 0.5–60 min
+        # prune existing buffer to new window
+        now = time.time()
+        cutoff = now - self._micro_window_sec
+        self._micro_trades = [(ts, p) for (ts, p) in self._micro_trades if ts >= cutoff]
+
+    def _micro_vwap_and_sigma(self) -> Tuple[Optional[float], Optional[float]]:
+        now = time.time()
+        cutoff = now - self._micro_window_sec
+        pts = [(p) for (ts, p) in self._micro_trades if ts >= cutoff]
+        self._micro_trades = [(ts, p) for (ts, p) in self._micro_trades if ts >= cutoff]
+        if not pts:
+            return None, None
+        n = float(len(pts))
+        mean = sum(pts) / n
+        if n <= 1:
+            return mean, None
+        var = sum((p - mean) ** 2 for p in pts) / (n - 1)
+        sigma = var ** 0.5 if var > 0 else 0.0
+        return mean, sigma
+
+    async def _bootstrap_micro_vwap(self):
+        """
+        Fetch a short slice of recent trades to initialize micro VWAP.
+        Uses ib_async.reqHistoricalTicks if available; silent on errors.
+        """
+        if not (self.ib.isConnected() and self._contract and self._micro_window_sec > 0):
+            return
+        try:
+            end = ""
+            # request up to micro_window_sec of ticks, capped (ib limit) to be safe
+            seconds = int(min(self._micro_window_sec, 600))
+            # ib_async >=2.0.1: historicalTicks via ib.reqHistoricalTicks
+            ticks = await self.ib.reqHistoricalTicksAsync(
+                self._contract,
+                "",  # end time now
+                seconds,
+                "TRADES",
+                useRth=True,
+                ignoreSize=False,
+            )
+            now = time.time()
+            cutoff = now - self._micro_window_sec
+            self._micro_trades.clear()
+            for t in ticks or []:
+                # t is HistoricalTick or similar with attributes price, size, time
+                try:
+                    px = float(getattr(t, "price"))
+                    ts = float(getattr(t, "time", now))
+                except Exception:
+                    continue
+                if not util.isNan(px) and ts >= cutoff:
+                    self._micro_trades.append((ts, px))
+        except Exception as e:
+            log_debug(f"micro VWAP bootstrap failed: {e}")
 
     @staticmethod
     def _convert_dom(rows: List[DOMLevel], side: str) -> List[DepthLevel]:
@@ -332,6 +404,12 @@ class IBDepthManager:
                                 # only guard price for NaN; size is already an int
                                 if util.isNan(price):
                                     continue
+                                # feed micro VWAP buffer
+                                try:
+                                    ts = float(getattr(t, "time", time.time()))
+                                except Exception:
+                                    ts = time.time()
+                                self._micro_trades.append((ts, price))
                                 self._on_tape_trade({
                                     "sym": self._symbol,
                                     "price": price,
