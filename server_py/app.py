@@ -261,6 +261,11 @@ def api_config():
             "alpha": getattr(cfg, "obi_alpha", None),
             "levelsMax": getattr(cfg, "obi_levels_max", 3),
         },
+        # Micro VWAP config
+        "microVWAPConfig": {
+            "minutes": getattr(manager, "_micro_window_minutes", None),
+            "bandK": getattr(manager, "_micro_band_k", 2.0),
+        },
     }
 @app.post("/api/start")
 async def api_start(req: StartReq):
@@ -384,7 +389,12 @@ async def broadcast_book_full(
 
     # Simple action hint: compact, mutually exclusive, glanceable
     def _compute_action_hint():
-        px = last if last is not None else (best_bid + best_ask) / 2 if (best_bid and best_ask) else None
+        if last is not None:
+            px = float(last)
+        elif best_bid is not None and best_ask is not None:
+            px = float(best_bid + best_ask) / 2.0
+        else:
+            px = None
         if px is None or micro_vwap is None:
             return None
         # band multiplier from manager (set via /api/microvwap), default 2σ

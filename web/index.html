@@ -291,6 +291,10 @@
       }
 
       async function loadYaml() {
+        if (!fetchUrl) {
+          baseList = [];
+          return;
+        }
         try {
           const res = await fetch(fetchUrl, { cache: 'no-store' });
           const txt = await res.text();
@@ -606,7 +610,7 @@
     })();
 
     // Initialize µVWAP window combo with defaults 2,5,10,15 and freeform add
-    initYamlCombo({
+    const microVwapCombo = initYamlCombo({
       comboId: 'microVwapCombo',
       tokenboxId: 'microVwapTokenbox',
       inputId: 'microVwapVisInput',
@@ -619,7 +623,28 @@
       normalize: s => String(s).trim().replace(/[, ]+/g,''),
       isValid: s => /^\d{1,3}$/.test(s),  // minutes
       keyCandidates: ['value']
-    }).setInitial(5);
+    });
+
+    // Load microVWAP config from server and seed UI controls
+    (async () => {
+      try {
+        const res = await fetch('/api/config', { cache: 'no-store' });
+        const cfg = await res.json();
+        const mvCfg = cfg.microVWAPConfig || {};
+        // Seed window if available
+        const minutes = mvCfg.minutes != null ? mvCfg.minutes : 5;
+        microVwapCombo.setInitial(minutes);
+        // Seed band_k if available
+        const bandK = mvCfg.bandK != null ? mvCfg.bandK : 2.0;
+        const bandSelect = document.getElementById('microBandSelect');
+        if (bandSelect) {
+          bandSelect.value = String(bandK);
+        }
+      } catch (e) {
+        // Fallback to defaults on error
+        microVwapCombo.setInitial(5);
+      }
+    })();
 
     // When µVWAP window selection changes, propagate to server
     const microHidden = document.getElementById('microVwapHidden');

@@ -44,6 +44,10 @@ class DummyManager:
             return
         self._micro_window_minutes = max(0.5, min(m, 60.0))
 
+    def _micro_vwap_and_sigma(self):
+        # Default offline stub: no microVWAP data
+        return None, None
+
 
 @pytest.fixture(scope="session")
 def app_module():
