@@ -261,9 +261,17 @@ def api_config():
             "alpha": getattr(cfg, "obi_alpha", None),
             "levelsMax": getattr(cfg, "obi_levels_max", 3),
         },
-        # Micro VWAP config
+        # Micro VWAP config (supports both DummyManager and IBDepthManager)
         "microVWAPConfig": {
-            "minutes": getattr(manager, "_micro_window_minutes", None),
+            "minutes": (
+                getattr(manager, "_micro_window_minutes", None)
+                if getattr(manager, "_micro_window_minutes", None) is not None
+                else (
+                    getattr(manager, "_micro_window_sec", None) / 60.0
+                    if getattr(manager, "_micro_window_sec", None) is not None
+                    else None
+                )
+            ),
             "bandK": getattr(manager, "_micro_band_k", 2.0),
         },
     }

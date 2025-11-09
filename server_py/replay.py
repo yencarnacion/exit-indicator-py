@@ -200,6 +200,26 @@ class PlaybackManager:
 
                         elif typ == "trade":
 
+                            # Update last/volume so book stats and hints are meaningful in replay
+
+                            try:
+
+                                px = float(evt.get("price"))
+
+                                sz = int(evt.get("size") or 0)
+
+                                if px == px:  # not NaN
+
+                                    self._last = px
+
+                                if sz > 0:
+
+                                    self._vol = (self._vol or 0) + sz
+
+                            except Exception:
+
+                                pass
+
                             self._on_tape_trade(evt)
 
                 if not self.cfg.loop:

@@ -60,6 +60,10 @@ class NDJSONRecorder:
 
                 if line is None:
 
+                    # Mark sentinel as done so join() can complete
+
+                    self._q.task_done()
+
                     break
 
                 fh.write(line + "\n")

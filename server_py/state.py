@@ -50,7 +50,12 @@ class State:
     def allow_alert(self, symbol: str, price: Decimal, now: float | None = None) -> bool:
         if now is None:
             now = time.time()
-        key = f"{symbol.upper()}:{price.normalize()}"
+        # Canonicalize price to 4 d.p. to match aggregation buckets and UI keys
+        try:
+            canonical = price.quantize(Decimal("0.0001"))
+        except Exception:
+            canonical = price
+        key = f"{symbol.upper()}:{canonical}"
         last = self._last_alert.get(key, 0.0)
         if now - last >= self.cooldown_seconds:
             self._last_alert[key] = now
