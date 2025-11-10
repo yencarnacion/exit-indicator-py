@@ -3,6 +3,8 @@ import asyncio
 import time as _time
 import json
 import os
+import math
+import contextlib
 from pathlib import Path
 from typing import Dict, Set, Optional
 from math import isfinite
@@ -79,11 +81,35 @@ else:
         on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
     )
 
+# --- periodic stats heartbeat (default: every 1.0s; override via EI_STATS_HEARTBEAT_SEC) ---
+HEARTBEAT_SECONDS = float(os.getenv("EI_STATS_HEARTBEAT_SEC", "1.0") or "1.0")
+
+async def _stats_heartbeat():
+    """
+    Push a tiny 'stats' frame with last/volume at a fixed cadence so the UI
+    refreshes even when DOM/quotes are quiet.
+    """
+    try:
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            if not state.symbol:
+                continue
+            last, volume = manager.current_quote()
+            if last is None and volume is None:
+                continue
+            await broadcast({"type": "stats", "data": {"last": last, "volume": volume}})
+    except asyncio.CancelledError:
+        pass
+
 # --- lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(manager.run())
+    mgr_task = asyncio.create_task(manager.run())
+    hb_task = asyncio.create_task(_stats_heartbeat())
     yield
+    hb_task.cancel()
+    with contextlib.suppress(Exception):
+        await hb_task
     await manager.stop()
     if recorder:
         await recorder.close()
@@ -545,7 +571,11 @@ async def broadcast_quote(bid: float | None, ask: float | None):
     if bid is not None: _last_bid = bid
     if ask is not None: _last_ask = ask
     tns_log(f"QUOTE bid={bid} ask={ask} (last_bid={_last_bid} last_ask={_last_ask})")
-    await broadcast({"type": "quote", "bid": bid, "ask": ask, "timeISO": None})
+    last, volume = manager.current_quote()
+    await broadcast({
+        "type": "quote", "bid": bid, "ask": ask,
+        "last": last, "volume": volume, "timeISO": None
+    })
 
 async def broadcast_trade(ev: dict):
     if recorder:
@@ -567,11 +597,14 @@ async def broadcast_trade(ev: dict):
     tns_log(f"EMIT trade: sym={sym} px={price:.4f} sz={size} amt={amount:.2f} "
             f"bid={_last_bid} ask={_last_ask} side={side} big={big} "
             f"$thr={state.dollar_threshold} $big={state.big_dollar_threshold}")
+    last, volume = manager.current_quote()
     payload = {
         "type": "trade",
         "sym": sym, "price": price, "size": size,
         "amount": amount, "amountStr": amountStr,
         "timeISO": None,
+        "last": last,
+        "volume": volume,
         "side": side, "color": color, "big": big,
         "bid": _last_bid, "ask": _last_ask,
         "silent": state.silent,

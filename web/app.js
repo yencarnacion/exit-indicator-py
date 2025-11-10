@@ -60,6 +60,14 @@
     if (n >= 10_000) return (n / 1_000).toFixed(1) + 'k';
     return n.toLocaleString();
   }
+  // Volume display: put a decimal before the last digit and add ' K'
+  // e.g., 111,037 -> "11,103.7 K"
+  function formatVolumeK(x) {
+    const v = Number(x);
+    if (!Number.isFinite(v)) return '—';
+    const scaled = v / 10;
+    return scaled.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' K';
+  }
   async function initConfig() {
     try {
       const res = await fetch('/api/config');
@@ -196,6 +204,15 @@
             if (msg.data.side === 'BID') { if (els.sideBid) els.sideBid.checked = true; } else { if (els.sideAsk) els.sideAsk.checked = true; }
             setBookTitle(msg.data.side);
           }
+        } else if (msg.type === 'stats') {
+          // 1s heartbeat: refresh Last/Volume even when DOM/quotes are quiet
+          const d = msg.data || {};
+          if (els.last && d.last != null) {
+            els.last.textContent = fmt2(d.last);
+          }
+          if (els.vol && d.volume != null) {
+            els.vol.textContent = formatVolumeK(d.volume);
+          }
         } else if (msg.type === 'book') {
           if (msg.data.side) setBookTitle(msg.data.side);
           // New payload: both sides + stats
@@ -326,16 +343,6 @@
   }
   function updateStats(s) {
     const fmtP = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
-    // Volume formatter:
-    // - place a decimal before the last digit (divide by 10)
-    // - show 1 decimal
-    // - append ' K' to clarify thousands
-    // Example: 111,037 -> 11,103.7 K
-    const fmtVolK = (x) => {
-      const v = Number(x);
-      if (!Number.isFinite(v)) return '—';
-      return (v / 10).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' K';
-    };
     const fmtOBI = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
     const bb = (s.bestBid != null) ? +s.bestBid : null;
     const ba = (s.bestAsk != null) ? +s.bestAsk : null;
@@ -344,7 +351,7 @@
     if (els.bestAsk) els.bestAsk.textContent = fmtP(ba);
     if (els.spread)  els.spread.textContent  = fmtP(sp);
     if (els.last)    els.last.textContent    = fmtP(s.last);
-    if (els.vol)     els.vol.textContent     = fmtVolK(s.volume);
+    if (els.vol)     els.vol.textContent     = formatVolumeK(s.volume);
     // OBI (−1..+1): quick mean-reversion read
     const obiEl = document.getElementById('obiVal');
     if (obiEl) {
@@ -465,6 +472,10 @@
     if (els.tapeBid && bid!=null) els.tapeBid.textContent = fmt2(bid);
     if (els.tapeAsk && ask!=null) els.tapeAsk.textContent = fmt2(ask);
     if (els.tapeSpread && bid!=null && ask!=null) els.tapeSpread.textContent = fmt2(ask - bid);
+    // Refresh volume whenever server includes it on quotes
+    if (els.vol && q && q.volume != null) {
+      els.vol.textContent = formatVolumeK(q.volume);
+    }
   }
   function tsRow(ev){
     const row = document.createElement('div');
@@ -516,6 +527,10 @@
     if (!els.tape) return;
     // prepend and keep scrolled to TOP unless user has scrolled away
     prependTapeRow(tsRow(ev));
+    // Refresh volume on every trade tick when server includes it
+    if (els.vol && ev && ev.volume != null) {
+      els.vol.textContent = formatVolumeK(ev.volume);
+    }
     // sound (mute respected)
     if (globalSilent || !TS_AUDIO.ready) return;
     const big = !!ev.big;

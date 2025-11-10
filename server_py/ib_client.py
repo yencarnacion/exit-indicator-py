@@ -55,6 +55,8 @@ class IBDepthManager:
         self._last_emit_ms = 0
         self._last_price: Optional[float] = None
         self._day_volume: Optional[int] = None
+        self._official_day_volume: Optional[int] = None
+        self._tbt_since_official: int = 0
         # tick-by-tick subscription state
         self._tbt_task: Optional[asyncio.Task] = None
         self._tbt_index: int = 0  # per-subscription index for quote_ticker.tickByTicks
@@ -139,6 +141,8 @@ class IBDepthManager:
         self._ticker = None
         self._quote_ticker = None
         self._last_price, self._day_volume = None, None
+        self._official_day_volume = None
+        self._tbt_since_official = 0
         # Reset micro VWAP state
         self._micro_trades.clear()
         # Detach quote callback from the old quote ticker (avoid leaks)
@@ -196,7 +200,11 @@ class IBDepthManager:
             )
             log_debug(f"Created new MktDepth subscription for {self._symbol}.")
 
-            self._quote_ticker = self.ib.reqMktData(self._contract, "233", False, False)
+            # Request RTVolume (233) so IB publishes official day volume promptly
+            # genericTickList="233" = RTVolume stream (includes cumulative day volume)
+            self._quote_ticker = self.ib.reqMktData(
+                self._contract, "233", False, False
+            )
             log_debug(f"Created new MktData subscription for {self._symbol}.")
             self._quote_ticker.updateEvent += self._on_quote_update
 
@@ -272,7 +280,11 @@ class IBDepthManager:
             if lp is not None and not util.isNan(lp): self._last_price = float(lp)
 
             vol = getattr(ticker, "volume", None)
-            if vol is not None and not util.isNan(vol): self._day_volume = int(vol)
+            if vol is not None and not util.isNan(vol):
+                # Reset baseline to official IB day volume; keep UI snappy via TBT deltas
+                self._official_day_volume = int(vol)
+                self._tbt_since_official = 0
+                self._day_volume = self._official_day_volume
             if DEBUG:
                 log_debug(f"quote update: last={self._last_price} volume={self._day_volume}")
 
@@ -411,6 +423,15 @@ class IBDepthManager:
                                 # only guard price for NaN; size is already an int
                                 if util.isNan(price):
                                     continue
+                                # Fast day-volume path: increment from TBT prints between official updates
+                                try:
+                                    base = int(self._official_day_volume or 0)
+                                except Exception:
+                                    base = 0
+                                if size > 0:
+                                    self._tbt_since_official += size
+                                self._day_volume = base + self._tbt_since_official
+                                self._last_price = price  # keep last fresh from prints too
                                 # feed micro VWAP buffer
                                 try:
                                     ts = float(getattr(t, "time", time.time()))
