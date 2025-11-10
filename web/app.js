@@ -326,7 +326,16 @@
   }
   function updateStats(s) {
     const fmtP = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
-    const fmtV = (x) => (Number.isFinite(+x) ? Number(x).toLocaleString() : '—');
+    // Volume formatter:
+    // - place a decimal before the last digit (divide by 10)
+    // - show 1 decimal
+    // - append ' K' to clarify thousands
+    // Example: 111,037 -> 11,103.7 K
+    const fmtVolK = (x) => {
+      const v = Number(x);
+      if (!Number.isFinite(v)) return '—';
+      return (v / 10).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' K';
+    };
     const fmtOBI = (x) => (Number.isFinite(+x) ? (+x).toFixed(2) : '—');
     const bb = (s.bestBid != null) ? +s.bestBid : null;
     const ba = (s.bestAsk != null) ? +s.bestAsk : null;
@@ -335,7 +344,7 @@
     if (els.bestAsk) els.bestAsk.textContent = fmtP(ba);
     if (els.spread)  els.spread.textContent  = fmtP(sp);
     if (els.last)    els.last.textContent    = fmtP(s.last);
-    if (els.vol)     els.vol.textContent     = fmtV(s.volume);
+    if (els.vol)     els.vol.textContent     = fmtVolK(s.volume);
     // OBI (−1..+1): quick mean-reversion read
     const obiEl = document.getElementById('obiVal');
     if (obiEl) {
