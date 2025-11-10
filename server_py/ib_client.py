@@ -60,7 +60,8 @@ class IBDepthManager:
         self._tbt_index: int = 0  # per-subscription index for quote_ticker.tickByTicks
         # --- micro VWAP (time-based window in seconds) ---
         self._micro_window_sec: float = 300.0  # default 5 minutes; UI can override via API if needed
-        self._micro_trades: List[Tuple[float, float]] = []  # (ts, price); we already gate on size elsewhere
+        # store (ts, price, size) for proper volume-weighted computation
+        self._micro_trades: List[Tuple[float, float, int]] = []
         log_debug("IBDepthManager initialized.")
 
     async def run(self):
@@ -195,7 +196,7 @@ class IBDepthManager:
             )
             log_debug(f"Created new MktDepth subscription for {self._symbol}.")
 
-            self._quote_ticker = self.ib.reqMktData(self._contract, "", False, False)
+            self._quote_ticker = self.ib.reqMktData(self._contract, "233", False, False)
             log_debug(f"Created new MktData subscription for {self._symbol}.")
             self._quote_ticker.updateEvent += self._on_quote_update
 
@@ -290,22 +291,27 @@ class IBDepthManager:
         # prune existing buffer to new window
         now = time.time()
         cutoff = now - self._micro_window_sec
-        self._micro_trades = [(ts, p) for (ts, p) in self._micro_trades if ts >= cutoff]
+        self._micro_trades = [(ts, p, sz) for (ts, p, sz) in self._micro_trades if ts >= cutoff]
 
     def _micro_vwap_and_sigma(self) -> Tuple[Optional[float], Optional[float]]:
         now = time.time()
         cutoff = now - self._micro_window_sec
-        pts = [(p) for (ts, p) in self._micro_trades if ts >= cutoff]
-        self._micro_trades = [(ts, p) for (ts, p) in self._micro_trades if ts >= cutoff]
+        # keep only (price, size) pairs within window and with positive size
+        pts = [(p, sz) for (ts, p, sz) in self._micro_trades if ts >= cutoff and sz > 0]
+        # prune buffer
+        self._micro_trades = [(ts, p, sz) for (ts, p, sz) in self._micro_trades if ts >= cutoff and sz > 0]
         if not pts:
             return None, None
-        n = float(len(pts))
-        mean = sum(pts) / n
-        if n <= 1:
-            return mean, None
-        var = sum((p - mean) ** 2 for p in pts) / (n - 1)
-        sigma = var ** 0.5 if var > 0 else 0.0
-        return mean, sigma
+        W   = float(sum(sz for (p, sz) in pts))           # Σ size
+        if W <= 0:
+            return None, None
+        WP  = sum(p * sz for (p, sz) in pts)              # Σ price·size
+        WP2 = sum((p * p) * sz for (p, sz) in pts)        # Σ price²·size
+        vwap = WP / W
+        # weighted (population) variance about VWAP
+        var = max(0.0, (WP2 / W) - (vwap * vwap))
+        sigma = var ** 0.5
+        return vwap, sigma
 
     async def _bootstrap_micro_vwap(self):
         """
@@ -334,11 +340,12 @@ class IBDepthManager:
                 # t is HistoricalTick or similar with attributes price, size, time
                 try:
                     px = float(getattr(t, "price"))
+                    sz = int(getattr(t, "size", 0) or 0)
                     ts = float(getattr(t, "time", now))
                 except Exception:
                     continue
-                if not util.isNan(px) and ts >= cutoff:
-                    self._micro_trades.append((ts, px))
+                if not util.isNan(px) and ts >= cutoff and sz > 0:
+                    self._micro_trades.append((ts, px, sz))
         except Exception as e:
             log_debug(f"micro VWAP bootstrap failed: {e}")
 
@@ -409,7 +416,8 @@ class IBDepthManager:
                                     ts = float(getattr(t, "time", time.time()))
                                 except Exception:
                                     ts = time.time()
-                                self._micro_trades.append((ts, price))
+                                if size > 0:
+                                    self._micro_trades.append((ts, price, size))
                                 self._on_tape_trade({
                                     "sym": self._symbol,
                                     "price": price,
