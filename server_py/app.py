@@ -30,6 +30,13 @@ CONFIG_PATH = os.environ.get("CONFIG_PATH", "./config.tws.yaml")
 cfg = Config.load(CONFIG_PATH)
 
 # --- DOM outlier clamp (recommended) -----------------------------------------
+def _pct_band() -> float:
+    try:
+        v = float(os.getenv("EI_L2_BAND_PCT", "0.20") or "0.20")
+    except Exception:
+        v = 0.20
+    return max(0.05, min(v, 0.50))
+
 def _get_anchor_price() -> float | None:
     """Midpoint of last tick-by-tick bid/ask when available; else last trade."""
     try:
@@ -51,11 +58,7 @@ def _filter_dom_outliers(asks: list[DepthLevel], bids: list[DepthLevel]) -> tupl
     anchor = _get_anchor_price()
     if anchor is None or anchor <= 0:
         return asks, bids
-    try:
-        pct = float(os.getenv("EI_L2_BAND_PCT", "0.20") or "0.20")
-    except Exception:
-        pct = 0.20
-    pct = max(0.05, min(pct, 0.50))  # clamp to 5–50%
+    pct = _pct_band()
     lo = anchor * (1.0 - pct)
     hi = anchor * (1.0 + pct)
     def keep(row: DepthLevel) -> bool:
@@ -553,20 +556,23 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
     # --- Sanity guard: if DOM best is clearly wrong, trust NBBO (tick-by-tick) ---
     try:
         use_nbbo = False
+        band = _pct_band()
+
+        def _bad(px, ref):
+            try:
+                return (px is None) or (float(px) <= 0) or \
+                       (abs(float(px) - float(ref)) / max(1e-9, abs(float(ref))) > band)
+            except Exception:
+                return True
+
         if _last_bid is not None and _last_ask is not None and _last_ask == _last_ask and _last_bid == _last_bid:
-            # Consider DOM bad if missing, crossed, or >20% off NBBO
-            def _bad(px, ref):
-                try:
-                    return (px is None) or (float(px) <= 0) or \
-                           (abs(float(px) - float(ref)) / max(1e-9, abs(float(ref))) > 0.20)
-                except Exception:
-                    return True
             if best_ask is None or best_bid is None:
                 use_nbbo = True
             elif float(best_ask) <= float(best_bid):
                 use_nbbo = True
             elif _bad(best_ask, _last_ask) or _bad(best_bid, _last_bid):
                 use_nbbo = True
+
         if use_nbbo:
             best_bid = Decimal(str(_last_bid))
             best_ask = Decimal(str(_last_ask))
@@ -590,6 +596,23 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
                               choose_alpha_heuristic(qb, qa))
             obi_val = compute_obi(qb, qa, obi_alpha_used)
             obi_levels_used = L
+    
+    # --- Final safety clamp for UI consistency ---
+    try:
+        if best_ask is not None and best_bid is not None and best_ask <= best_bid:
+            # Drop any rows that would keep the book crossed
+            ask_book  = [lvl for lvl in ask_book if lvl.price > best_bid]
+            bid_book  = [lvl for lvl in bid_book if lvl.price < best_ask]
+            # If nothing left on a side, leave empty; UI will render blanks
+        else:
+            # If NBBO replacement adjusted bests, trim tables to be consistent
+            if best_bid is not None:
+                bid_book = [lvl for lvl in bid_book if lvl.price <= best_bid]
+            if best_ask is not None:
+                ask_book = [lvl for lvl in ask_book if lvl.price >= best_ask]
+    except Exception:
+        pass
+    
     if ask_book or bid_book:
         await broadcast_book_full(ask_book, bid_book, best_ask, best_bid, last, volume,
                                   obi=obi_val, obi_alpha=obi_alpha_used, obi_levels=obi_levels_used)
