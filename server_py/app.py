@@ -17,6 +17,7 @@ from .config import Config
 from .state import State
 from .sound import sound_info
 from .depth import aggregate_top10, aggregate_both_top10, AggregatedLevel, AlertEvent, DepthLevel
+from decimal import Decimal
 from .ib_client import IBConfig, IBDepthManager
 from .obi import compute_obi, choose_alpha_heuristic
 from .recording import NDJSONRecorder
@@ -27,6 +28,46 @@ DEBUG = False
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "./config.tws.yaml")
 cfg = Config.load(CONFIG_PATH)
+
+# --- DOM outlier clamp (recommended) -----------------------------------------
+def _get_anchor_price() -> float | None:
+    """Midpoint of last tick-by-tick bid/ask when available; else last trade."""
+    try:
+        if _last_bid is not None and _last_ask is not None:
+            b = float(_last_bid); a = float(_last_ask)
+            if isfinite(b) and isfinite(a) and b > 0 and a > 0:
+                return (a + b) * 0.5
+    except Exception:
+        pass
+    try:
+        last, _ = manager.current_quote()
+        if last is not None and isfinite(float(last)) and float(last) > 0:
+            return float(last)
+    except Exception:
+        pass
+    return None
+
+def _filter_dom_outliers(asks: list[DepthLevel], bids: list[DepthLevel]) -> tuple[list[DepthLevel], list[DepthLevel]]:
+    anchor = _get_anchor_price()
+    if anchor is None or anchor <= 0:
+        return asks, bids
+    try:
+        pct = float(os.getenv("EI_L2_BAND_PCT", "0.20") or "0.20")
+    except Exception:
+        pct = 0.20
+    pct = max(0.05, min(pct, 0.50))  # clamp to 5–50%
+    lo = anchor * (1.0 - pct)
+    hi = anchor * (1.0 + pct)
+    def keep(row: DepthLevel) -> bool:
+        try:
+            p = float(row.price)
+            return (p >= lo) and (p <= hi)
+        except Exception:
+            return False
+    A = [r for r in asks if keep(r)]
+    B = [r for r in bids if keep(r)]
+    # If filtering nuked a side entirely (e.g., at session start), keep originals
+    return (A or asks), (B or bids)
 
 # --- T&S focused debug switch (env or config) ---
 def _is_true(x) -> bool:
@@ -501,11 +542,38 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
         if DEBUG:
             print("DEBUG: Symbol mismatch, discarding snapshot.")
         return
+    # Drop extreme DOM outliers relative to the current anchor before aggregating.
+    asks, bids = _filter_dom_outliers(asks, bids)
     ask_book, bid_book, alerts, best_ask, best_bid = aggregate_both_top10(state, asks, bids)
     if DEBUG:
         print(f"DEBUG: Aggregated both books. Asks: {len(ask_book)}, Bids: {len(bid_book)}, Alerts: {len(alerts)}")
     # Pull last/volume from IB manager
     last, volume = manager.current_quote()
+
+    # --- Sanity guard: if DOM best is clearly wrong, trust NBBO (tick-by-tick) ---
+    try:
+        use_nbbo = False
+        if _last_bid is not None and _last_ask is not None and _last_ask == _last_ask and _last_bid == _last_bid:
+            # Consider DOM bad if missing, crossed, or >20% off NBBO
+            def _bad(px, ref):
+                try:
+                    return (px is None) or (float(px) <= 0) or \
+                           (abs(float(px) - float(ref)) / max(1e-9, abs(float(ref))) > 0.20)
+                except Exception:
+                    return True
+            if best_ask is None or best_bid is None:
+                use_nbbo = True
+            elif float(best_ask) <= float(best_bid):
+                use_nbbo = True
+            elif _bad(best_ask, _last_ask) or _bad(best_bid, _last_bid):
+                use_nbbo = True
+        if use_nbbo:
+            best_bid = Decimal(str(_last_bid))
+            best_ask = Decimal(str(_last_ask))
+    except Exception:
+        # Never let the guardrail crash the pipeline
+        pass
+
     # --- OBI computation (top ≤3 levels per side) ---
     obi_val = None
     obi_alpha_used = None
