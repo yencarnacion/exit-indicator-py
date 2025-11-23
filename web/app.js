@@ -10,6 +10,12 @@
     test: document.getElementById('testSoundBtn'),
     bookBidBody: document.querySelector('#bookTableBid tbody'),
     bookAskBody: document.querySelector('#bookTableAsk tbody'),
+
+    /* NEW: DOM history canvases + footprint strip */
+    domHistBid: document.getElementById('domHistoryBid'),
+    domHistAsk: document.getElementById('domHistoryAsk'),
+    footprintBody: document.getElementById('footprintBody'),
+
     log: document.getElementById('alertLog'),
     compact: document.getElementById('compactToggle'),
     bestBid: document.getElementById('bestBid'),
@@ -29,6 +35,31 @@
     microVwapVal: document.getElementById('microVwapVal'),
     actionHintPill: document.getElementById('actionHintPill'),
   };
+
+  // --- DOM history + orderflow state (client-side only) ---
+  const DOM_HISTORY_LEN = 60;            // number of DOM snapshots per side
+  const BUBBLE_LIFETIME_MS = 1500;       // big-trade bubble lifetime
+  const FOOTPRINT_WINDOW_MS = 5000;      // recent-flow window for footprint
+
+  // Per-rank recent delta accumulators (shares) for BID/ASK ladders
+  const footprint = {
+    BID: Array.from({ length: 10 }, () => ({ buyVol: 0, sellVol: 0, lastUpdate: 0 })),
+    ASK: Array.from({ length: 10 }, () => ({ buyVol: 0, sellVol: 0, lastUpdate: 0 })),
+  };
+
+  // Big-trade bubbles keyed by side + priceKey
+  const tradeBubbles = {
+    BID: Object.create(null),
+    ASK: Object.create(null),
+  };
+
+  // Last DOM snapshot (top 10 per side) for trade → DOM mapping
+  let currentBook = { bids: [], asks: [] };
+
+  // DOM history heatmap instances per side
+  let domHistBidChart = null;
+  let domHistAskChart = null;
+
   // --- OBI mini chart handle ---
   let obiChart = null;
   let ws;
@@ -289,9 +320,243 @@
       tbody.appendChild(tr);
     });
   }
+
+  // Build a 10‑element normalized snapshot [0..1] from DOM rows for heatmap
+  function buildDomSnapshot(rows) {
+    const levels = 10;
+    const vec = new Float32Array(levels);
+    if (!rows || !rows.length) return vec;
+
+    let max = 0;
+    for (let i = 0; i < rows.length && i < levels; i++) {
+      const r = rows[i];
+      if (!r) continue;
+      const idx = (typeof r.rank === 'number' && r.rank >= 0 && r.rank < levels) ? r.rank : i;
+      const size = Number(r.sumShares) || 0;
+      vec[idx] = size;
+      if (size > max) max = size;
+    }
+    if (max > 0) {
+      const inv = 1 / max;
+      for (let i = 0; i < levels; i++) {
+        vec[i] = Math.max(0, Math.min(1, vec[i] * inv));
+      }
+    }
+    return vec;
+  }
+
+  function pruneBubbles(nowMs) {
+    for (const side of ['BID', 'ASK']) {
+      const bucket = tradeBubbles[side];
+      if (!bucket) continue;
+      for (const key of Object.keys(bucket)) {
+        const b = bucket[key];
+        if (!b || (nowMs - b.ts) > BUBBLE_LIFETIME_MS) {
+          delete bucket[key];
+        }
+      }
+    }
+  }
+
+  function syncFootprintHeights() {
+    const tbody = els.footprintBody;
+    if (!tbody) return;
+    const fpRows = tbody.querySelectorAll('tr');
+    const bidRows = els.bookBidBody ? els.bookBidBody.querySelectorAll('tr') : [];
+    const askRows = els.bookAskBody ? els.bookAskBody.querySelectorAll('tr') : [];
+    const count = Math.min(fpRows.length, bidRows.length, askRows.length);
+    if (!count) return;
+    for (let i = 0; i < count; i++) {
+      const br = bidRows[i];
+      const ar = askRows[i];
+      const h = Math.max(
+        br ? br.getBoundingClientRect().height : 0,
+        ar ? ar.getBoundingClientRect().height : 0
+      );
+      if (h > 0) {
+        fpRows[i].style.height = h + 'px';
+      }
+    }
+  }
+
+  function renderFootprintStrip(threshold) {
+    const tbody = els.footprintBody;
+    if (!tbody) return;
+    const now = Date.now();
+
+    // Decay / windowing
+    for (const side of ['BID', 'ASK']) {
+      const arr = footprint[side];
+      if (!arr) continue;
+      for (let i = 0; i < arr.length; i++) {
+        const cell = arr[i];
+        if (!cell) continue;
+        if (cell.lastUpdate && (now - cell.lastUpdate) > FOOTPRINT_WINDOW_MS) {
+          cell.buyVol = 0;
+          cell.sellVol = 0;
+          cell.lastUpdate = 0;
+        }
+      }
+    }
+
+    tbody.innerHTML = '';
+    const levels = 10;
+    const norm = Math.max(1, threshold || 1);
+
+    for (let i = 0; i < levels; i++) {
+      const askCell = footprint.ASK[i] || { buyVol: 0, sellVol: 0 };
+      const bidCell = footprint.BID[i] || { buyVol: 0, sellVol: 0 };
+
+      // Net aggressive flow at this rank across both sides:
+      // buys (at/above ask) – sells (at/below bid)
+      const buy = (askCell.buyVol || 0) + (bidCell.buyVol || 0);
+      const sell = (askCell.sellVol || 0) + (bidCell.sellVol || 0);
+      const net = buy - sell;
+      const mag = Math.abs(net);
+      const m = Math.min(1, mag / norm);
+
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.className = 'footprint-cell-wrap';
+      const cellDiv = document.createElement('div');
+      cellDiv.className = 'footprint-cell';
+
+      if (net > 0) {
+        cellDiv.classList.add('footprint-buy');
+      } else if (net < 0) {
+        cellDiv.classList.add('footprint-sell');
+      } else {
+        cellDiv.classList.add('footprint-neutral');
+      }
+
+      const baseOpacity = 0.15;
+      const op = baseOpacity + (1 - baseOpacity) * m;
+      cellDiv.style.opacity = op.toFixed(3);
+
+      td.appendChild(cellDiv);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+
+    // Try to keep rows visually aligned with the DOM tables
+    syncFootprintHeights();
+  }
+
+  // Map trade price → closest DOM row (within ~2 ticks) for a given side
+  function findClosestLevel(tradePrice, levels) {
+    if (!levels || !levels.length) return null;
+    const px = (typeof tradePrice === 'string') ? parseFloat(tradePrice) : tradePrice;
+    if (!Number.isFinite(px)) return null;
+
+    let bestIdx = -1;
+    let bestDiff = Infinity;
+    let prevPrice = null;
+    let minStep = Infinity;
+
+    for (let i = 0; i < levels.length; i++) {
+      const r = levels[i];
+      if (!r) continue;
+      const p = (typeof r.price === 'string') ? parseFloat(r.price) : r.price;
+      if (!Number.isFinite(p)) continue;
+      const d = Math.abs(p - px);
+      if (d < bestDiff) {
+        bestDiff = d;
+        bestIdx = i;
+      }
+      if (prevPrice != null) {
+        const step = Math.abs(p - prevPrice);
+        if (step > 0 && step < minStep) {
+          minStep = step;
+        }
+      }
+      prevPrice = p;
+    }
+    if (bestIdx < 0) return null;
+
+    // Simple tick-size heuristic + 2-tick tolerance
+    let tick = (minStep < Infinity) ? minStep : (px >= 5 ? 0.05 : 0.01);
+    if (tick <= 0) tick = px >= 5 ? 0.05 : 0.01;
+    const MAX_TICKS = 2;
+    if (bestDiff > MAX_TICKS * tick + 1e-6 && bestDiff > 1e-4) {
+      return null; // too far from ladder → ignore
+    }
+    return { levelIdx: bestIdx, price: levels[bestIdx].price };
+  }
+
+  // Ingest a trade into bubbles + footprint accumulators
+  function updateOrderflowFromTrade(ev) {
+    if (!ev || ev.price == null) return;
+    const px = (typeof ev.price === 'string') ? parseFloat(ev.price) : ev.price;
+    if (!Number.isFinite(px)) return;
+
+    const side = ev.side || '';
+    const isBuyAgg  = side === 'at_ask'  || side === 'above_ask'  || side === 'between_ask';
+    const isSellAgg = side === 'at_bid'  || side === 'below_bid'  || side === 'between_bid';
+    // 'between_mid' is ambiguous → ignore for footprint/bubbles
+
+    let bookSide = null;
+    if (isBuyAgg) bookSide = 'ASK';
+    else if (isSellAgg) bookSide = 'BID';
+    if (!bookSide) return;
+
+    const levels = bookSide === 'ASK' ? currentBook.asks : currentBook.bids;
+    if (!levels || !levels.length) return;
+
+    const match = findClosestLevel(px, levels);
+    if (!match) return;
+
+    const now = Date.now();
+    const row = levels[match.levelIdx];
+    const key = priceKey(match.price);
+
+    // --- bubbles ---
+    const bucket = tradeBubbles[bookSide] || (tradeBubbles[bookSide] = Object.create(null));
+    bucket[key] = {
+      kind: isBuyAgg ? 'buy' : 'sell',
+      ts: now,
+      big: !!ev.big,
+    };
+
+    // --- footprint ---
+    const rank = (row && typeof row.rank === 'number') ? row.rank : match.levelIdx;
+    if (rank < 0 || rank >= 10) return;
+    const fpCell = footprint[bookSide][rank];
+    const sz = Number(ev.size) || 0;
+    if (sz <= 0) return;
+
+    if (isBuyAgg) {
+      fpCell.buyVol += sz;
+    } else {
+      fpCell.sellVol += sz;
+    }
+    fpCell.lastUpdate = now;
+  }
+
   function renderBooks(data) {
     clearLoadingTimer();
     const thr = Math.max(1, parseInt(els.thr.value || '0', 10) || 1);
+
+    // Snapshot current book for all order‑flow visuals
+    currentBook.bids = Array.isArray(data.bids) ? data.bids.slice(0, 10) : [];
+    currentBook.asks = Array.isArray(data.asks) ? data.asks.slice(0, 10) : [];
+
+    // DOM history mini heatmaps (per side)
+    if (domHistBidChart || domHistAskChart) {
+      const bidVec = buildDomSnapshot(currentBook.bids);
+      const askVec = buildDomSnapshot(currentBook.asks);
+      if (domHistBidChart) {
+        domHistBidChart.push(bidVec);
+        domHistBidChart.draw();
+      }
+      if (domHistAskChart) {
+        domHistAskChart.push(askVec);
+        domHistAskChart.draw();
+      }
+    }
+
+    // Age out expired bubbles
+    pruneBubbles(Date.now());
+
     const makeSide = (tbody, rows, side) => {
       tbody.innerHTML = '';
       // Ensure exactly 10 rows rendered
@@ -315,6 +580,7 @@
         const meter = document.createElement('div'); meter.className = 'meter';
         const fill = document.createElement('div'); fill.className = 'fill';
         const label = document.createElement('span'); label.className = 'label';
+
         if (r) {
           const size = r.sumShares || 0;
           const ratio = size / thr;
@@ -331,14 +597,35 @@
           fill.style.width = '0%';
           label.textContent = '';
         }
-        meter.appendChild(fill); meter.appendChild(label);
+
+        meter.appendChild(fill);
+        meter.appendChild(label);
+
+        // Big‑trade bubble overlay
+        if (r) {
+          const sideKey = side === 'BID' ? 'BID' : 'ASK';
+          const bubblesForSide = tradeBubbles[sideKey];
+          const b = bubblesForSide && bubblesForSide[priceKey(r.price)];
+          if (b) {
+            const bubble = document.createElement('span');
+            bubble.className = 'bubble ' + (b.kind === 'buy' ? 'bubble-buy' : 'bubble-sell');
+            if (b.big) bubble.classList.add('bubble-big');
+            meter.appendChild(bubble);
+          }
+        }
+
         sizeTd.appendChild(meter);
         tr.append(rankTd, priceTd, sizeTd);
         tbody.appendChild(tr);
       }
     };
-    makeSide(els.bookBidBody, data.bids || [], 'BID');
-    makeSide(els.bookAskBody, data.asks || [], 'ASK');
+
+    makeSide(els.bookBidBody, currentBook.bids, 'BID');
+    makeSide(els.bookAskBody, currentBook.asks, 'ASK');
+
+    // Central micro-footprint strip (per rank recent delta)
+    renderFootprintStrip(thr);
+
     if (data.stats) updateStats(data.stats);
   }
   function updateStats(s) {
@@ -524,13 +811,18 @@
   }
 
   function onTSTrade(ev){
-    if (!els.tape) return;
-    // prepend and keep scrolled to TOP unless user has scrolled away
-    prependTapeRow(tsRow(ev));
+    // T&S tape
+    if (els.tape) {
+      prependTapeRow(tsRow(ev));
+    }
     // Refresh volume on every trade tick when server includes it
     if (els.vol && ev && ev.volume != null) {
       els.vol.textContent = formatVolumeK(ev.volume);
     }
+
+    // Feed DOM bubbles + micro-footprint accumulators
+    updateOrderflowFromTrade(ev);
+
     // sound (mute respected)
     if (globalSilent || !TS_AUDIO.ready) return;
     const big = !!ev.big;
@@ -658,6 +950,20 @@
     els.compact.addEventListener('change', () => {
       document.body.classList.toggle('compact', els.compact.checked);
       localStorage.setItem('ei.compact', els.compact.checked ? '1' : '0');
+
+      // Re-layout canvases when height changes
+      if (obiChart && typeof obiChart.resize === 'function') {
+        obiChart.resize();
+        obiChart.draw();
+      }
+      if (domHistBidChart && typeof domHistBidChart.resize === 'function') {
+        domHistBidChart.resize();
+        domHistBidChart.draw();
+      }
+      if (domHistAskChart && typeof domHistAskChart.resize === 'function') {
+        domHistAskChart.resize();
+        domHistAskChart.draw();
+      }
     });
   }
   // Warn if navigating away while subscribed
@@ -671,6 +977,7 @@
   // Boot
   initConfig().then(() => {
     initObiMiniChart();
+    initDomHistoryCharts();
     connectWS();
   });
 
@@ -809,5 +1116,118 @@
     obiChart = new ObiMiniChart(c, { maxPoints: 360 });
     // draw an empty grid immediately (nice skeleton on load)
     obiChart.draw();
+  }
+
+  // --------- DOM history mini heatmap implementation ----------
+  class DomHistoryHeatmap {
+    constructor(canvas, side, opts = {}) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d');
+      this.side = side;
+      this.levels = opts.levels || 10;
+      this.maxSnapshots = opts.maxSnapshots || DOM_HISTORY_LEN;
+      this.data = new Array(this.maxSnapshots); // ring buffer of Float32Array(levels)
+      this.len = 0;
+      this.head = 0;
+      this.dpr = 1;
+      this.bg = '#050910';
+
+      const bidColor = cssVar('--dom-bid', 'rgba(79,179,255,1)');
+      const askColor = cssVar('--dom-ask', 'rgba(255,123,123,1)');
+      this.baseColor = (side === 'BID') ? bidColor : askColor;
+
+      this.resize();
+      window.addEventListener('resize', () => { this.resize(); this.draw(); });
+    }
+    push(vec) {
+      if (!(vec instanceof Float32Array)) {
+        vec = new Float32Array(vec);
+      }
+      if (vec.length !== this.levels) {
+        const v = new Float32Array(this.levels);
+        const copyLen = Math.min(this.levels, vec.length);
+        for (let i = 0; i < copyLen; i++) v[i] = vec[i];
+        vec = v;
+      }
+      this.data[this.head] = vec;
+      this.head = (this.head + 1) % this.maxSnapshots;
+      if (this.len < this.maxSnapshots) this.len++;
+    }
+    resize() {
+      if (!this.canvas) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      this.dpr = dpr;
+      this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    }
+    _parseBaseColor() {
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.fillStyle = this.baseColor;
+      const computed = ctx.fillStyle;
+      ctx.restore();
+      const m = computed.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+      if (!m) return { r: 79, g: 179, b: 255 };
+      return { r: +m[1], g: +m[2], b: +m[3] };
+    }
+    draw() {
+      const ctx = this.ctx;
+      if (!ctx) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const Wcss = rect.width || 1;
+      const Hcss = rect.height || 1;
+      const dpr = this.dpr || 1;
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, Wcss, Hcss);
+
+      // background
+      ctx.fillStyle = this.bg;
+      ctx.fillRect(0, 0, Wcss, Hcss);
+
+      const n = this.len;
+      if (!n) {
+        ctx.restore();
+        return;
+      }
+
+      const levels = this.levels;
+      const cellW = Wcss / this.maxSnapshots;
+      const cellH = Hcss / levels;
+      const x0 = Wcss - n * cellW; // right-align snapshots
+
+      const { r, g, b } = this._parseBaseColor();
+
+      for (let i = 0; i < n; i++) {
+        const idx = (this.head - n + i + this.maxSnapshots) % this.maxSnapshots;
+        const vec = this.data[idx];
+        if (!vec) continue;
+        const x = x0 + i * cellW;
+        for (let level = 0; level < levels; level++) {
+          const v = Math.max(0, Math.min(1, vec[level] || 0));
+          if (v <= 0) continue;
+          const y = level * cellH;
+          const alpha = 0.12 + 0.88 * v;
+          ctx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`;
+          ctx.fillRect(x, y, cellW + 0.5, cellH + 0.5);
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  function initDomHistoryCharts() {
+    const bidCanvas = els.domHistBid;
+    const askCanvas = els.domHistAsk;
+    if (bidCanvas) {
+      domHistBidChart = new DomHistoryHeatmap(bidCanvas, 'BID', { maxSnapshots: DOM_HISTORY_LEN, levels: 10 });
+      domHistBidChart.draw();
+    }
+    if (askCanvas) {
+      domHistAskChart = new DomHistoryHeatmap(askCanvas, 'ASK', { maxSnapshots: DOM_HISTORY_LEN, levels: 10 });
+      domHistAskChart.draw();
+    }
   }
 })();

@@ -158,6 +158,7 @@
     </section>
 
     <section class="book">
+
       <!-- Summary stats row -->
       <div class="book-stats" id="bookStats">
         <div class="stat"><span class="stat-label">Best Bid</span><span class="stat-val" id="bestBid">—</span></div>
@@ -182,7 +183,7 @@
       </div>
 
       <div class="book-panels">
-        <!-- (book tables unchanged) -->
+        <!-- Bid ladder + DOM history -->
         <div class="book-panel bid">
           <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
             <span class="chip chip-neutral">&lt;1×</span>
@@ -190,6 +191,12 @@
             <span class="chip chip-hot">1.5–2.0×</span>
             <span class="chip chip-danger">≥2×</span>
           </div>
+          <!-- mini DOM history heatmap (bids) -->
+          <canvas
+            id="domHistoryBid"
+            class="dom-history dom-history-bid"
+            aria-hidden="true">
+          </canvas>
           <table id="bookTableBid">
             <thead>
               <tr>
@@ -201,6 +208,15 @@
             <tbody></tbody>
           </table>
         </div>
+
+        <!-- Central micro-footprint strip -->
+        <div class="footprint-strip" id="footprintStrip" aria-label="Recent aggressive flow by DOM rank">
+          <table>
+            <tbody id="footprintBody"></tbody>
+          </table>
+        </div>
+
+        <!-- Ask ladder + DOM history -->
         <div class="book-panel ask">
           <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
             <span class="chip chip-neutral">&lt;1×</span>
@@ -208,6 +224,12 @@
             <span class="chip chip-hot">1.5–2.0×</span>
             <span class="chip chip-danger">≥2×</span>
           </div>
+          <!-- mini DOM history heatmap (asks) -->
+          <canvas
+            id="domHistoryAsk"
+            class="dom-history dom-history-ask"
+            aria-hidden="true">
+          </canvas>
           <table id="bookTableAsk">
             <thead>
               <tr>
@@ -220,6 +242,7 @@
           </table>
         </div>
       </div>
+
     </section>
 
     <section class="tape-wrap" id="tapeWrap" aria-label="Time & Sales">
