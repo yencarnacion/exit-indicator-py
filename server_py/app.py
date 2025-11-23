@@ -95,15 +95,13 @@ ws_lock = asyncio.Lock()
 # Sound
 _snd = sound_info(cfg.sound_file)
 
-# Recording setup
+# Recording / playback setup
 REC_PATH = os.getenv("EI_RECORD_TO", "").strip()
 REPLAY_FROM = os.getenv("EI_REPLAY_FROM", "").strip()
 REPLAY_RATE = float(os.getenv("EI_REPLAY_RATE", "1.0"))
 REPLAY_LOOP = os.getenv("EI_REPLAY_LOOP", "0").lower() in ("1","true","yes","on")
 
 recorder: NDJSONRecorder | None = None
-if REC_PATH:
-    recorder = NDJSONRecorder(REC_PATH, meta={"started_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())})
 
 # Manager: choose live vs playback
 if REPLAY_FROM:
@@ -148,15 +146,29 @@ async def _stats_heartbeat():
 # --- lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global recorder
+
+    # Lazily create the recorder only once the event loop is definitely running
+    if REC_PATH:
+        recorder = NDJSONRecorder(
+            REC_PATH,
+            meta={"started_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())},
+        )
+
     mgr_task = asyncio.create_task(manager.run())
     hb_task = asyncio.create_task(_stats_heartbeat())
-    yield
-    hb_task.cancel()
-    with contextlib.suppress(Exception):
-        await hb_task
-    await manager.stop()
-    if recorder:
-        await recorder.close()
+    try:
+        yield
+    finally:
+        hb_task.cancel()
+        with contextlib.suppress(Exception):
+            await hb_task
+        await manager.stop()
+        # (optional, but nice) wait for manager.run() to exit
+        with contextlib.suppress(Exception):
+            await mgr_task
+        if recorder:
+            await recorder.close()
 
 app = FastAPI(lifespan=lifespan)
 # --- static assets (serve existing ./web) ---

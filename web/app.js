@@ -41,10 +41,10 @@
   const BUBBLE_LIFETIME_MS = 1500;       // big-trade bubble lifetime
   const FOOTPRINT_WINDOW_MS = 5000;      // recent-flow window for footprint
 
-  // Per-rank recent delta accumulators (shares) for BID/ASK ladders
+  // Per-price recent delta accumulators (shares) for BID/ASK ladders (keyed by priceKey)
   const footprint = {
-    BID: Array.from({ length: 10 }, () => ({ buyVol: 0, sellVol: 0, lastUpdate: 0 })),
-    ASK: Array.from({ length: 10 }, () => ({ buyVol: 0, sellVol: 0, lastUpdate: 0 })),
+    BID: new Map(), // Map<priceKey, { buyVol, sellVol, lastUpdate }>
+    ASK: new Map(), // Map<priceKey, { buyVol, sellVol, lastUpdate }>
   };
 
   // Big-trade bubbles keyed by side + priceKey
@@ -358,43 +358,18 @@
     }
   }
 
-  function syncFootprintHeights() {
-    const tbody = els.footprintBody;
-    if (!tbody) return;
-    const fpRows = tbody.querySelectorAll('tr');
-    const bidRows = els.bookBidBody ? els.bookBidBody.querySelectorAll('tr') : [];
-    const askRows = els.bookAskBody ? els.bookAskBody.querySelectorAll('tr') : [];
-    const count = Math.min(fpRows.length, bidRows.length, askRows.length);
-    if (!count) return;
-    for (let i = 0; i < count; i++) {
-      const br = bidRows[i];
-      const ar = askRows[i];
-      const h = Math.max(
-        br ? br.getBoundingClientRect().height : 0,
-        ar ? ar.getBoundingClientRect().height : 0
-      );
-      if (h > 0) {
-        fpRows[i].style.height = h + 'px';
-      }
-    }
-  }
-
   function renderFootprintStrip(threshold) {
     const tbody = els.footprintBody;
     if (!tbody) return;
     const now = Date.now();
 
-    // Decay / windowing
+    // Decay / windowing: drop stale price buckets from each side
     for (const side of ['BID', 'ASK']) {
-      const arr = footprint[side];
-      if (!arr) continue;
-      for (let i = 0; i < arr.length; i++) {
-        const cell = arr[i];
-        if (!cell) continue;
-        if (cell.lastUpdate && (now - cell.lastUpdate) > FOOTPRINT_WINDOW_MS) {
-          cell.buyVol = 0;
-          cell.sellVol = 0;
-          cell.lastUpdate = 0;
+      const bucket = footprint[side];
+      if (!bucket) continue;
+      for (const [key, cell] of bucket.entries()) {
+        if (!cell || (cell.lastUpdate && (now - cell.lastUpdate) > FOOTPRINT_WINDOW_MS)) {
+          bucket.delete(key);
         }
       }
     }
@@ -403,15 +378,27 @@
     const levels = 10;
     const norm = Math.max(1, threshold || 1);
 
+    // Iterate visible DOM ranks and map them to price-keyed footprint data
     for (let i = 0; i < levels; i++) {
-      const askCell = footprint.ASK[i] || { buyVol: 0, sellVol: 0 };
-      const bidCell = footprint.BID[i] || { buyVol: 0, sellVol: 0 };
+      const askRow = currentBook.asks[i] || null;
+      const bidRow = currentBook.bids[i] || null;
 
-      // Net aggressive flow at this rank across both sides:
-      // buys (at/above ask) – sells (at/below bid)
-      const buy = (askCell.buyVol || 0) + (bidCell.buyVol || 0);
-      const sell = (askCell.sellVol || 0) + (bidCell.sellVol || 0);
-      const net = buy - sell;
+      const askPriceKey = askRow ? priceKey(askRow.price) : null;
+      const bidPriceKey = bidRow ? priceKey(bidRow.price) : null;
+
+      let net = 0;
+
+      // Net aggressive flow at this visual level:
+      // buys (at/above ask) – sells (at/below bid), keyed by price
+      if (askPriceKey && footprint.ASK.has(askPriceKey)) {
+        const c = footprint.ASK.get(askPriceKey);
+        if (c) net += (c.buyVol || 0) - (c.sellVol || 0);
+      }
+      if (bidPriceKey && footprint.BID.has(bidPriceKey)) {
+        const c = footprint.BID.get(bidPriceKey);
+        if (c) net += (c.buyVol || 0) - (c.sellVol || 0);
+      }
+
       const mag = Math.abs(net);
       const m = Math.min(1, mag / norm);
 
@@ -437,9 +424,6 @@
       tr.appendChild(td);
       tbody.appendChild(tr);
     }
-
-    // Try to keep rows visually aligned with the DOM tables
-    syncFootprintHeights();
   }
 
   // Map trade price → closest DOM row (within ~2 ticks) for a given side
@@ -509,7 +493,7 @@
     const row = levels[match.levelIdx];
     const key = priceKey(match.price);
 
-    // --- bubbles ---
+    // --- bubbles (still keyed by DOM ladder price for that level) ---
     const bucket = tradeBubbles[bookSide] || (tradeBubbles[bookSide] = Object.create(null));
     bucket[key] = {
       kind: isBuyAgg ? 'buy' : 'sell',
@@ -517,19 +501,101 @@
       big: !!ev.big,
     };
 
-    // --- footprint ---
-    const rank = (row && typeof row.rank === 'number') ? row.rank : match.levelIdx;
-    if (rank < 0 || rank >= 10) return;
-    const fpCell = footprint[bookSide][rank];
+    // --- footprint (price-keyed, independent of current rank) ---
+    const fpBucket = footprint[bookSide];
+    const fpKey = priceKey(px); // use actual trade price (bucketed by priceKey)
     const sz = Number(ev.size) || 0;
     if (sz <= 0) return;
 
-    if (isBuyAgg) {
-      fpCell.buyVol += sz;
-    } else {
-      fpCell.sellVol += sz;
+    let cell = fpBucket.get(fpKey);
+    if (!cell) {
+      cell = { buyVol: 0, sellVol: 0, lastUpdate: 0 };
+      fpBucket.set(fpKey, cell);
     }
-    fpCell.lastUpdate = now;
+
+    if (isBuyAgg) {
+      cell.buyVol += sz;
+    } else {
+      cell.sellVol += sz;
+    }
+    cell.lastUpdate = now;
+  }
+
+  // HELPER: Update a row instead of destroying it
+  function updateRow(tr, rowData, thr, side) {
+    // 1. Update Rank/Price Text
+    const priceNum = (rowData && Number.isFinite(parseFloat(rowData.price))) ? parseFloat(rowData.price) : 0;
+    tr.dataset.price = rowData ? priceKey(rowData.price) : "";
+
+    if (tr.children.length < 3) return;
+
+    tr.children[0].textContent = rowData ? rowData.rank : "";           // Rank
+    tr.children[1].textContent = rowData ? priceNum.toFixed(2) : "";    // Price
+
+    // 2. Update Size/Meter
+    const sizeCell = tr.children[2];
+    const meter = sizeCell.firstElementChild; // .meter div
+    if (!meter) return;
+    const fill = meter.firstElementChild; // .fill div
+    const label = fill ? fill.nextElementSibling : null; // .label span
+    if (!fill || !label) return;
+
+    if (rowData) {
+      const size = rowData.sumShares || 0;
+      const ratio = size / thr;
+      const width = Math.min(1, ratio) * 100;
+
+      // Update classes efficiently
+      fill.className = 'fill'; // reset
+      if (ratio >= 2) fill.classList.add('danger');
+      else if (ratio >= 1.5) fill.classList.add('hot');
+      else if (ratio >= 1.0) fill.classList.add('warn');
+
+      fill.style.width = width.toFixed(2) + '%';
+      const ratioTxt = ratio.toFixed(2) + '×';
+      label.textContent = `${formatShares(size)} ${ratioTxt}`;
+
+      // Highlight if best bid/ask
+      if (rowData.rank === 0) tr.classList.add('best');
+      else tr.classList.remove('best');
+
+      if (ratio >= 1.0) tr.classList.add('over');
+      else tr.classList.remove('over');
+    } else {
+      fill.style.width = '0%';
+      label.textContent = '';
+      tr.classList.remove('best');
+      tr.classList.remove('over');
+    }
+
+    // 3. MANAGE BUBBLES (The Fix)
+    // We do NOT clear the meter. We only append NEW bubbles.
+    // Existing bubbles fade out via CSS and are removed by animationend.
+    if (rowData) {
+      const sideKey = side; // 'BID' or 'ASK'
+      const key = priceKey(rowData.price);
+      const bucket = tradeBubbles[sideKey];
+
+      // Check if we have a bubble for this specific Price Key
+      if (bucket && bucket[key]) {
+        const b = bucket[key];
+        // Prevent re-adding the same bubble timestamp
+        // Store last rendered timestamp on the DOM element to dedupe
+        const lastTs = tr.dataset.lastBubbleTs ? parseInt(tr.dataset.lastBubbleTs, 10) || 0 : 0;
+
+        if (b.ts > lastTs) {
+          const bubble = document.createElement('span');
+          bubble.className = 'bubble ' + (b.kind === 'buy' ? 'bubble-buy' : 'bubble-sell');
+          if (b.big) bubble.classList.add('bubble-big');
+
+          // Remove bubble from DOM after animation completes to keep DOM light
+          bubble.addEventListener('animationend', () => bubble.remove());
+
+          meter.appendChild(bubble);
+          tr.dataset.lastBubbleTs = String(b.ts);
+        }
+      }
+    }
   }
 
   function renderBooks(data) {
@@ -558,65 +624,16 @@
     pruneBubbles(Date.now());
 
     const makeSide = (tbody, rows, side) => {
-      tbody.innerHTML = '';
-      // Ensure exactly 10 rows rendered
-      for (let i = 0; i < 10; i++) {
-        const r = rows[i];
+      // Sync row count (ensure 10 rows exist)
+      while (tbody.children.length < 10) {
         const tr = document.createElement('tr');
-        if (r) tr.dataset.price = priceKey(r.price);
-        const rankTd = document.createElement('td');
-        rankTd.className = 'col-rank';
-        rankTd.textContent = r ? r.rank : '';
-        const priceTd = document.createElement('td');
-        priceTd.className = 'col-price';
-        if (r) {
-          const priceNum = (typeof r.price === 'string') ? parseFloat(r.price) : r.price;
-          priceTd.textContent = Number.isFinite(priceNum) ? priceNum.toFixed(2) : String(r.price);
-        } else {
-          priceTd.textContent = '';
-        }
-        const sizeTd = document.createElement('td');
-        sizeTd.className = 'col-size';
-        const meter = document.createElement('div'); meter.className = 'meter';
-        const fill = document.createElement('div'); fill.className = 'fill';
-        const label = document.createElement('span'); label.className = 'label';
-
-        if (r) {
-          const size = r.sumShares || 0;
-          const ratio = size / thr;
-          const width = Math.min(1, ratio) * 100;
-          if (ratio >= 2) fill.classList.add('danger');
-          else if (ratio >= 1.5) fill.classList.add('hot');
-          else if (ratio >= 1.0) fill.classList.add('warn');
-          fill.style.width = width.toFixed(2) + '%';
-          const ratioTxt = ratio.toFixed(2) + '×';
-          label.textContent = `${formatShares(size)} ${ratioTxt}`;
-          if (r.rank === 0) tr.classList.add('best');
-          if (ratio >= 1.0) tr.classList.add('over');
-        } else {
-          fill.style.width = '0%';
-          label.textContent = '';
-        }
-
-        meter.appendChild(fill);
-        meter.appendChild(label);
-
-        // Big‑trade bubble overlay
-        if (r) {
-          const sideKey = side === 'BID' ? 'BID' : 'ASK';
-          const bubblesForSide = tradeBubbles[sideKey];
-          const b = bubblesForSide && bubblesForSide[priceKey(r.price)];
-          if (b) {
-            const bubble = document.createElement('span');
-            bubble.className = 'bubble ' + (b.kind === 'buy' ? 'bubble-buy' : 'bubble-sell');
-            if (b.big) bubble.classList.add('bubble-big');
-            meter.appendChild(bubble);
-          }
-        }
-
-        sizeTd.appendChild(meter);
-        tr.append(rankTd, priceTd, sizeTd);
+        tr.innerHTML = `<td class="col-rank"></td><td class="col-price"></td><td class="col-size"><div class="meter"><div class="fill"></div><span class="label"></span></div></td>`;
         tbody.appendChild(tr);
+      }
+
+      // Update existing rows
+      for (let i = 0; i < 10; i++) {
+        updateRow(tbody.children[i], rows[i], thr, side);
       }
     };
 

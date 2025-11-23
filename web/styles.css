@@ -204,6 +204,15 @@ body.compact .dom-history {
   margin-bottom: 4px;
 }
 
+/* Force identical heights for alignment */
+.book tr, .footprint-strip tr {
+  height: 32px; /* Set a fixed height */
+}
+/* In Compact mode */
+body.compact .book tr, body.compact .footprint-strip tr {
+  height: 24px;
+}
+
 /* Switch (Compact mode) */
 .switch { position: relative; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
 .switch .slider {
