@@ -60,6 +60,9 @@ class IBDepthManager:
         # tick-by-tick subscription state
         self._tbt_task: Optional[asyncio.Task] = None
         self._tbt_index: int = 0  # per-subscription index for quote_ticker.tickByTicks
+        # Keep most recent tick-by-tick bid/ask so trades can be classified accurately
+        self._last_bid: Optional[float] = None
+        self._last_ask: Optional[float] = None
         # --- micro VWAP (time-based window in seconds) ---
         self._micro_window_sec: float = 300.0  # default 5 minutes; UI can override via API if needed
         # store (ts, price, size) for proper volume-weighted computation
@@ -143,6 +146,7 @@ class IBDepthManager:
         self._last_price, self._day_volume = None, None
         self._official_day_volume = None
         self._tbt_since_official = 0
+        self._last_bid, self._last_ask = None, None
         # Reset micro VWAP state
         self._micro_trades.clear()
         # Detach quote callback from the old quote ticker (avoid leaks)
@@ -333,15 +337,14 @@ class IBDepthManager:
         if not (self.ib.isConnected() and self._contract and self._micro_window_sec > 0):
             return
         try:
-            end = ""
-            # request up to micro_window_sec of ticks, capped (ib limit) to be safe
-            seconds = int(min(self._micro_window_sec, 600))
-            # ib_async >=2.0.1: historicalTicks via ib.reqHistoricalTicks
+            # reqHistoricalTicks takes a tick-count, not a time delta. We request a modest
+            # batch and then time-filter to the micro window.
             ticks = await self.ib.reqHistoricalTicksAsync(
-                self._contract,
-                "",  # end time now
-                seconds,
-                "TRADES",
+                contract=self._contract,
+                startDateTime="",
+                endDateTime="",
+                numberOfTicks=1000,
+                whatToShow="TRADES",
                 useRth=True,
                 ignoreSize=False,
             )
@@ -416,6 +419,8 @@ class IBDepthManager:
                             if isinstance(t, TickByTickBidAsk):
                                 bid = float(t.bidPrice) if t.bidPrice is not None and not util.isNan(t.bidPrice) else None
                                 ask = float(t.askPrice) if t.askPrice is not None and not util.isNan(t.askPrice) else None
+                                self._last_bid = bid
+                                self._last_ask = ask
                                 self._on_tape_quote(bid, ask)
                             elif isinstance(t, TickByTickAllLast):
                                 price = float(t.price)
@@ -443,13 +448,17 @@ class IBDepthManager:
                                     "sym": self._symbol,
                                     "price": price,
                                     "size": size,
-                                    "bid": None, "ask": None, "timeISO": None,
+                                    "bid": self._last_bid,
+                                    "ask": self._last_ask,
+                                    "timeISO": None,
                                 })
                         except Exception as e:
                             log_debug(f"TBT pump item error: {e}")
                     self._tbt_index = n
-                # short sleep keeps latency low but avoids a hot loop
-                await asyncio.sleep(0.05)  # 50 ms
+                # Adaptive sleep:
+                # - when we just processed ticks (start < n): keep latency tight
+                # - when idle: back off to save CPU
+                await asyncio.sleep(0.005 if start < n else 0.02)
         except asyncio.CancelledError:
             pass
         except Exception as e:

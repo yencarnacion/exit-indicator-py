@@ -1,7 +1,11 @@
 dollarvalue:
+  - label: "$0"
+    threshold: 0
+    big_threshold: 0
   - label: "$1"
     threshold: 100
     big_threshold: 1000
+  # ...
   - label: "$2"
     threshold: 200
     big_threshold: 2000

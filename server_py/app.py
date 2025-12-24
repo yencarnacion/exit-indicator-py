@@ -103,6 +103,71 @@ REPLAY_LOOP = os.getenv("EI_REPLAY_LOOP", "0").lower() in ("1","true","yes","on"
 
 recorder: NDJSONRecorder | None = None
 
+# --- T&S queues (prevents create_task-per-tick overload) ---
+TNS_Q_MAX = int(os.getenv("EI_TNS_QUEUE_MAX", "0") or "0")  # 0 = unbounded
+_trade_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=TNS_Q_MAX) if TNS_Q_MAX > 0 else asyncio.Queue()
+_quote_q: asyncio.Queue[tuple[float | None, float | None]] = (
+    asyncio.Queue(maxsize=TNS_Q_MAX) if TNS_Q_MAX > 0 else asyncio.Queue()
+)
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
+def _q_put_drop_old(q: asyncio.Queue, item) -> None:
+    try:
+        q.put_nowait(item)
+    except asyncio.QueueFull:
+        # Drop oldest to keep newest (better for "live feel")
+        try:
+            _ = q.get_nowait()
+            q.task_done()
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            q.put_nowait(item)
+
+def _call_in_main_loop(fn, *args) -> None:
+    """
+    Ensure queue mutation happens in the main event loop thread.
+    (Asyncio queues are not thread-safe; IB callbacks may arrive off-loop.)
+    """
+    global _MAIN_LOOP
+    try:
+        # If we're already in the running loop, just call directly.
+        asyncio.get_running_loop()
+        fn(*args)
+        return
+    except RuntimeError:
+        pass
+    if _MAIN_LOOP is not None:
+        _MAIN_LOOP.call_soon_threadsafe(fn, *args)
+
+def enqueue_trade(ev: dict) -> None:
+    _call_in_main_loop(_q_put_drop_old, _trade_q, ev)
+
+def enqueue_quote(bid: float | None, ask: float | None) -> None:
+    _call_in_main_loop(_q_put_drop_old, _quote_q, (bid, ask))
+
+async def _trade_worker():
+    try:
+        while True:
+            ev = await _trade_q.get()
+            try:
+                await broadcast_trade(ev)
+            finally:
+                _trade_q.task_done()
+    except asyncio.CancelledError:
+        return
+
+async def _quote_worker():
+    try:
+        while True:
+            bid, ask = await _quote_q.get()
+            try:
+                await broadcast_quote(bid, ask)
+            finally:
+                _quote_q.task_done()
+    except asyncio.CancelledError:
+        return
+
 # Manager: choose live vs playback
 if REPLAY_FROM:
     manager = PlaybackManager(
@@ -110,8 +175,8 @@ if REPLAY_FROM:
         on_status=lambda c: asyncio.create_task(broadcast_status(c)),
         on_snapshot=lambda sym, asks, bids: asyncio.create_task(on_dom_snapshot(sym, asks, bids)),
         on_error=lambda msg: asyncio.create_task(broadcast_error(msg)),
-        on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
-        on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
+        on_tape_quote=lambda b,a: enqueue_quote(b, a),
+        on_tape_trade=lambda ev: enqueue_trade(ev),
     )
 else:
     manager = IBDepthManager(
@@ -119,8 +184,8 @@ else:
         on_status=lambda c: asyncio.create_task(broadcast_status(c)),
         on_snapshot=lambda sym, asks, bids: asyncio.create_task(on_dom_snapshot(sym, asks, bids)),
         on_error=lambda msg: asyncio.create_task(broadcast_error(msg)),
-        on_tape_quote=lambda b,a: asyncio.create_task(broadcast_quote(b,a)),
-        on_tape_trade=lambda ev: asyncio.create_task(broadcast_trade(ev)),
+        on_tape_quote=lambda b,a: enqueue_quote(b, a),
+        on_tape_trade=lambda ev: enqueue_trade(ev),
     )
 
 # --- periodic stats heartbeat (default: every 1.0s; override via EI_STATS_HEARTBEAT_SEC) ---
@@ -147,6 +212,7 @@ async def _stats_heartbeat():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global recorder
+    global _MAIN_LOOP
 
     # Lazily create the recorder only once the event loop is definitely running
     if REC_PATH:
@@ -155,12 +221,22 @@ async def lifespan(app: FastAPI):
             meta={"started_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())},
         )
 
+    _MAIN_LOOP = asyncio.get_running_loop()
+
     mgr_task = asyncio.create_task(manager.run())
     hb_task = asyncio.create_task(_stats_heartbeat())
+    quote_task = asyncio.create_task(_quote_worker())
+    trade_task = asyncio.create_task(_trade_worker())
     try:
         yield
     finally:
+        quote_task.cancel()
+        trade_task.cancel()
         hb_task.cancel()
+        with contextlib.suppress(Exception):
+            await quote_task
+        with contextlib.suppress(Exception):
+            await trade_task
         with contextlib.suppress(Exception):
             await hb_task
         await manager.stop()
@@ -360,6 +436,10 @@ def api_config():
 @app.post("/api/start")
 async def api_start(req: StartReq):
     sym = state.set_symbol(req.symbol)
+    # Clear last NBBO cache to avoid cross-symbol bestBid/bestAsk contamination
+    global _last_bid, _last_ask
+    _last_bid = None
+    _last_ask = None
     if req.threshold is not None and req.threshold > 0:
         state.set_threshold(req.threshold)
     if req.side:
@@ -379,6 +459,10 @@ async def api_start(req: StartReq):
 async def api_stop():
     tns_log("POST /api/stop")
     state.set_symbol("")
+    # Clear last NBBO cache to avoid cross-symbol bestBid/bestAsk contamination
+    global _last_bid, _last_ask
+    _last_bid = None
+    _last_ask = None
     await manager.unsubscribe()
     await broadcast_status(state.connected)
     return {"ok": True}
@@ -693,12 +777,14 @@ async def broadcast_trade(ev: dict):
         tns_log(f"DROP trade (below $ threshold): sym={sym} px={price:.4f} sz={size} "
                 f"amt={amount:.2f} < $thr={state.dollar_threshold}")
         return
-    # Classify vs last seen bid/ask
-    side, color = _classify_trade(price, _last_bid, _last_ask)
+    # Classify vs best available bid/ask (prefer per-event, fall back to globals)
+    bid = ev.get("bid") if ev.get("bid") is not None else _last_bid
+    ask = ev.get("ask") if ev.get("ask") is not None else _last_ask
+    side, color = _classify_trade(price, bid, ask)
     big = bool(state.big_dollar_threshold and amount >= state.big_dollar_threshold)
     amountStr, _ = _fmt_amount(amount)
     tns_log(f"EMIT trade: sym={sym} px={price:.4f} sz={size} amt={amount:.2f} "
-            f"bid={_last_bid} ask={_last_ask} side={side} big={big} "
+            f"bid={bid} ask={ask} side={side} big={big} "
             f"$thr={state.dollar_threshold} $big={state.big_dollar_threshold}")
     last, volume = manager.current_quote()
     payload = {
@@ -709,7 +795,7 @@ async def broadcast_trade(ev: dict):
         "last": last,
         "volume": volume,
         "side": side, "color": color, "big": big,
-        "bid": _last_bid, "ask": _last_ask,
+        "bid": bid, "ask": ask,
         "silent": state.silent,
     }
     await broadcast(payload)

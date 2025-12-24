@@ -119,6 +119,19 @@
         </label>
       </div>
 
+      <!-- T&S audio UX toggles -->
+      <div class="field">
+        <label>&nbsp;</label>
+        <label class="check">
+          <input id="machineGunToggle" type="checkbox" checked />
+          <span>Machine gun clicks</span>
+        </label>
+        <label class="check" style="margin-top:6px">
+          <input id="voiceBigOnlyToggle" type="checkbox" checked />
+          <span>Only voice on big prints</span>
+        </label>
+      </div>
+
       <!-- Micro VWAP controls: window + band k -->
       <div class="field">
         <label for="microVwapVisInput">µVWAP Window (min)</label>
@@ -506,8 +519,9 @@
             break;
           case 'Enter':
             e.preventDefault();
-            if (focusedIndex >= 0 && options[focusedIndex]) {
-              addValue(options[focusedIndex].textContent);
+            if (focusedIndex >= 0 && filtered[focusedIndex]) {
+              // Use the underlying value (e.g. Dollar JSON), not the displayed label
+              addValue(filtered[focusedIndex]);
             } else {
               const v = normalize(input.value);
               if (isValid(v)) addValue(v);
@@ -546,7 +560,7 @@
           renderTokens();
           input.value = '';
           input.readOnly = true;
-          input.placeholder = `Selected: ${v}`;
+          input.placeholder = `Selected: ${toDisplay(v)}`;
           closeDropdown();
           syncHidden();
         }

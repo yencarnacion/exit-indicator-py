@@ -29,6 +29,8 @@
     tapeAsk: document.getElementById('tapeAsk'),
     tapeSpread: document.getElementById('tapeSpread'),
     silent: document.getElementById('silentToggle'),
+    machineGun: document.getElementById('machineGunToggle'),
+    voiceBigOnly: document.getElementById('voiceBigOnlyToggle'),
     dollarHidden: document.getElementById('dollarHidden'),
     microVwapHidden: document.getElementById('microVwapHidden'),
     microBandSelect: document.getElementById('microBandSelect'),
@@ -68,6 +70,9 @@
   let soundURL = '';
   let soundAvailable = false;
   let globalSilent = false;
+  // T&S audio UX toggles (persisted)
+  let tsMachineGunClicks = true;
+  let tsVoiceBigOnly = true;
   let tns = { dollar: 0, bigDollar: 0 }; // T&S thresholds
   let loadingTimer = null;
   let waitingForData = false;
@@ -125,6 +130,19 @@
     } catch (e) {
       console.warn('config failed', e);
     }
+
+    // T&S audio UX toggles (persisted like compact)
+    try {
+      const mgSaved = localStorage.getItem('ei.ts.machineGun');
+      tsMachineGunClicks = (mgSaved === null) ? true : (mgSaved === '1');
+      if (els.machineGun) els.machineGun.checked = tsMachineGunClicks;
+    } catch {}
+    try {
+      const vbSaved = localStorage.getItem('ei.ts.voiceBigOnly');
+      tsVoiceBigOnly = (vbSaved === null) ? true : (vbSaved === '1');
+      if (els.voiceBigOnly) els.voiceBigOnly.checked = tsVoiceBigOnly;
+    } catch {}
+
     // Compact preference: default ON if unset
     const saved = localStorage.getItem('ei.compact');
     const savedCompact = (saved === null) ? true : (saved === '1');
@@ -170,25 +188,129 @@
     engine: null, ready: false
   };
   class Mixer {
-    constructor(map){ this.map = map; this.ctx=null; this.buffers=new Map(); this.gain=null; this.active=[]; }
+    constructor(map){
+      this.map = map;
+      this.ctx=null;
+      this.buffers=new Map();
+      this.master=null;
+      this.comp=null;
+      this.active=[];
+      this._lastWhen = 0;         // for scheduling
+      this.minGapSec = 0.003;     // 3ms spacing to avoid same-sample-time pileups
+    }
     async init(){
       const AC = window.AudioContext || window.webkitAudioContext; if(!AC) return false;
-      this.ctx = new AC(); this.gain = this.ctx.createGain(); this.gain.connect(this.ctx.destination);
+      this.ctx = new AC();
+
+      // Master gain + compressor (prevents clipping when it gets insane)
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.9;
+
+      this.comp = this.ctx.createDynamicsCompressor();
+      // mild limiter-ish settings
+      this.comp.threshold.value = -18;
+      this.comp.knee.value = 18;
+      this.comp.ratio.value = 6;
+      this.comp.attack.value = 0.003;
+      this.comp.release.value = 0.08;
+
+      this.master.connect(this.comp);
+      this.comp.connect(this.ctx.destination);
+
       for (const [k,u] of Object.entries(this.map)) {
-        try { const resp = await fetch(u, {cache:"force-cache"}); const buf=await resp.arrayBuffer();
-              this.buffers.set(k, await this.ctx.decodeAudioData(buf)); } catch {}
+        try {
+          const resp = await fetch(u, {cache:"force-cache"});
+          const buf=await resp.arrayBuffer();
+          // Safari-safe decode wrapper
+          const audioBuf = await new Promise((res, rej) => {
+            this.ctx.decodeAudioData(buf, res, rej);
+          });
+          this.buffers.set(k, audioBuf);
+        } catch (e) {
+          console.warn("sound load failed", k, u, e);
+        }
       }
+      // Return true if at least one wav is available; ticks work regardless.
       return this.buffers.size>0;
     }
     async resume(){ if(this.ctx && this.ctx.state==="suspended") try{ await this.ctx.resume(); }catch{} }
-    play(k, rate=1){ if(globalSilent) return; const b=this.buffers.get(k); if(!b) return;
-      const s=this.ctx.createBufferSource(); s.buffer=b; s.playbackRate.value=rate; s.connect(this.gain); s.start();
-      this.active.push(s); s.onended=()=>{ const i=this.active.indexOf(s); if(i>=0) this.active.splice(i,1); };
+
+    _sched(whenSec){
+      const now = this.ctx.currentTime;
+      const t = Math.max(now, whenSec || 0, this._lastWhen);
+      this._lastWhen = t + this.minGapSec;
+      return t;
+    }
+
+    play(k, { rate=1, gain=1, when=0 } = {}){
+      if(globalSilent) return;
+      const b=this.buffers.get(k);
+      if(!b || !this.ctx) return;
+
+      const t = this._sched(when);
+
+      const src = this.ctx.createBufferSource();
+      src.buffer = b;
+      src.playbackRate.value = rate;
+
+      const g = this.ctx.createGain();
+      g.gain.value = gain;
+
+      src.connect(g);
+      g.connect(this.master);
+
+      src.start(t);
+
+      this.active.push(src);
+      src.onended = () => {
+        try { src.disconnect(); } catch {}
+        try { g.disconnect(); } catch {}
+        const i=this.active.indexOf(src);
+        if(i>=0) this.active.splice(i,1);
+      };
+    }
+
+    // NEW: ultra-short tick per trade
+    tick({ f0=1000, f1=900, gain=0.05, dur=0.018, when=0 } = {}){
+      if(globalSilent) return;
+      if(!this.ctx) return;
+
+      const t = this._sched(when);
+
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+
+      // sharp click-like envelope
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+      osc.type = "square";
+      osc.frequency.setValueAtTime(f0, t);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(40, f1), t + dur);
+
+      osc.connect(g);
+      g.connect(this.master);
+
+      osc.start(t);
+      osc.stop(t + dur + 0.002);
+
+      osc.onended = () => {
+        try { osc.disconnect(); } catch {}
+        try { g.disconnect(); } catch {}
+      };
     }
     stop(){ for(const s of this.active){ try{s.stop(0);}catch{} } this.active.length=0; }
   }
-  (async () => { const m = new Mixer(TS_AUDIO.urls); TS_AUDIO.ready = await m.init(); TS_AUDIO.engine = m; })();
-  function tsPlay(key, rate=1){ if(!TS_AUDIO.ready) return; TS_AUDIO.engine.play(key, rate); }
+  (async () => {
+    const m = new Mixer(TS_AUDIO.urls);
+    TS_AUDIO.engine = m;                 // ticks can work even if no wavs load
+    TS_AUDIO.ready = await m.init();     // wav availability
+  })();
+  function tsPlay(key, rate=1, gain=1){
+    if(!TS_AUDIO.ready || !TS_AUDIO.engine) return;
+    TS_AUDIO.engine.play(key, { rate, gain });
+  }
   function showLoadingState() {
     const make = (tbody) => {
       tbody.innerHTML = '';
@@ -263,9 +385,8 @@
           onTSTrade(msg);
         } else if (msg.type === 'error') {
           // MODIFIED: Ignore harmless Error 310
-          if (!msg.data.message.includes('Error 310')) {
-            appendError(msg.data.message || 'Error');
-          }
+          const m = (msg && msg.data && typeof msg.data.message === 'string') ? msg.data.message : '';
+          if (!m.includes('Error 310')) appendError(m || 'Error');
         }
       } catch (e) {
         console.warn('bad ws message', e);
@@ -503,7 +624,9 @@
 
     // --- footprint (price-keyed, independent of current rank) ---
     const fpBucket = footprint[bookSide];
-    const fpKey = priceKey(px); // use actual trade price (bucketed by priceKey)
+    // Key by the matched DOM ladder price so the footprint strip (which is rendered by ladder levels)
+    // reflects aggressive prints even when trade px is above/below the displayed ladder row.
+    const fpKey = priceKey(match.price);
     const sz = Number(ev.size) || 0;
     if (sz <= 0) return;
 
@@ -841,16 +964,80 @@
     updateOrderflowFromTrade(ev);
 
     // sound (mute respected)
-    if (globalSilent || !TS_AUDIO.ready) return;
-    const big = !!ev.big;
-    switch (ev.side){
-      case "above_ask":   tsPlay("above_ask", big?1.5:1.0); break;
-      case "at_ask":      tsPlay("buy",       big?1.5:1.0); break;
-      case "between_mid": tsPlay("between",   1.0); break;
-      case "between_ask": tsPlay("u",         1.0); break;
-      case "between_bid": tsPlay("d",         1.0); break;
-      case "at_bid":      tsPlay("sell",      big?0.85:1.0); break;
-      case "below_bid":   tsPlay("below_bid", big?0.85:1.0); break;
+    if (globalSilent) return;
+    if (!TS_AUDIO.engine) return;
+
+    function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+
+    // Log-scale “intensity” from dollars (works across symbols)
+    function tradeIntensity(ev){
+      const amt = Number(ev.amount) || 0;
+      if (!Number.isFinite(amt) || amt <= 0) return 0;
+
+      // Use your selected thresholds if present; else a sane default range
+      const lo = Math.max(1, Number(tns.dollar || 1)); // filter threshold
+      const hi = Math.max(lo * 20, Number(tns.bigDollar || (lo * 50))); // “big” reference
+
+      // intensity 0..1 between lo..hi on a log curve
+      const x = Math.log(amt / lo) / Math.log(hi / lo);
+      return clamp01(x);
+    }
+
+    function sideToTickFreq(side){
+      switch(side){
+        case "above_ask":   return [2200, 1700];
+        case "at_ask":      return [1900, 1500];
+        case "between_ask": return [1500, 1200];
+        case "between_mid": return [1200, 1050];
+        case "between_bid": return [950,  820];
+        case "at_bid":      return [780,  650];
+        case "below_bid":   return [620,  520];
+        default:            return [1200, 1000];
+      }
+    }
+
+    // Always do the machine-gun tick (optional toggle)
+    const I = tradeIntensity(ev);
+    const [f0, f1] = sideToTickFreq(ev.side);
+
+    // louder & slightly sharper when bigger
+    if (tsMachineGunClicks) {
+      TS_AUDIO.engine.tick({
+        f0: f0 * (1 + 0.35 * I),
+        f1: f1 * (1 + 0.20 * I),
+        gain: 0.02 + 0.08 * I,
+        dur: 0.012 + 0.020 * I,
+      });
+
+      // Optional: "double tick" on big prints
+      if (ev.big || I > 0.85) {
+        TS_AUDIO.engine.tick({
+          f0: f0 * (1.08 + 0.25 * I),
+          f1: f1 * (1.05 + 0.18 * I),
+          gain: 0.015 + 0.06 * I,
+          dur: 0.010 + 0.016 * I,
+          when: (TS_AUDIO.engine.ctx ? (TS_AUDIO.engine.ctx.currentTime + 0.016) : 0),
+        });
+      }
+    }
+
+    // Optional: WAV “word sounds” as accent marks
+    // - default: only big prints
+    // - if toggle off: allow WAVs for all trades (can get loud)
+    if (TS_AUDIO.ready && (!tsVoiceBigOnly || (ev.big || I > 0.7))) {
+      const rate = 0.95 + 0.50 * I;
+      const gain = 0.15 + 0.25 * I;
+      const key = ({
+        "above_ask":"above_ask",
+        "at_ask":"buy",
+        "between_mid":"between",
+        "between_ask":"u",
+        "between_bid":"d",
+        "at_bid":"sell",
+        "below_bid":"below_bid"
+      })[ev.side];
+
+      if (key) TS_AUDIO.engine.play(key, { rate, gain });
     }
   }
   async function start() {
@@ -956,6 +1143,18 @@
     els.silent.addEventListener('change', async () => {
       globalSilent = !!els.silent.checked;
       try { await fetch('/api/silent', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({silent: globalSilent})}); } catch {}
+    });
+  }
+  if (els.machineGun) {
+    els.machineGun.addEventListener('change', () => {
+      tsMachineGunClicks = !!els.machineGun.checked;
+      try { localStorage.setItem('ei.ts.machineGun', tsMachineGunClicks ? '1' : '0'); } catch {}
+    });
+  }
+  if (els.voiceBigOnly) {
+    els.voiceBigOnly.addEventListener('change', () => {
+      tsVoiceBigOnly = !!els.voiceBigOnly.checked;
+      try { localStorage.setItem('ei.ts.voiceBigOnly', tsVoiceBigOnly ? '1' : '0'); } catch {}
     });
   }
   els.sym.addEventListener('keydown', (e) => { if (e.key === 'Enter') start(); });

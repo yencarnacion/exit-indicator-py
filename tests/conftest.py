@@ -78,6 +78,10 @@ def reset_app_state(app_module):
     # Reset WS
     app_module.ws_clients.clear()
 
+    # Reset module-level NBBO cache so tests don't leak bid/ask across runs
+    app_module._last_bid = None
+    app_module._last_ask = None
+
     yield
 
 
