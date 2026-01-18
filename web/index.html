@@ -195,21 +195,22 @@
         <canvas id="obiMiniCanvas" aria-label="Order Book Imbalance mini chart" role="img"></canvas>
       </div>
 
+      <!-- L2 legend (shared) -->
+      <div class="legend l2-legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
+        <span class="chip chip-neutral">&lt;1×</span>
+        <span class="chip chip-warn">1.0–1.5×</span>
+        <span class="chip chip-hot">1.5–2.0×</span>
+        <span class="chip chip-danger">≥2×</span>
+      </div>
+
+      <!-- 1m real-time volume chart (replaces the two unused DOM-history graphs) -->
+      <div class="vol1m-wrap" title="1m volume: green = close > open, red = close < open">
+        <canvas id="vol1mCanvas" class="vol1m" aria-label="1 minute volume chart" role="img"></canvas>
+      </div>
+
       <div class="book-panels">
-        <!-- Bid ladder + DOM history -->
+        <!-- Bid ladder -->
         <div class="book-panel bid">
-          <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
-            <span class="chip chip-neutral">&lt;1×</span>
-            <span class="chip chip-warn">1.0–1.5×</span>
-            <span class="chip chip-hot">1.5–2.0×</span>
-            <span class="chip chip-danger">≥2×</span>
-          </div>
-          <!-- mini DOM history heatmap (bids) -->
-          <canvas
-            id="domHistoryBid"
-            class="dom-history dom-history-bid"
-            aria-hidden="true">
-          </canvas>
           <table id="bookTableBid">
             <thead>
               <tr>
@@ -229,20 +230,8 @@
           </table>
         </div>
 
-        <!-- Ask ladder + DOM history -->
+        <!-- Ask ladder -->
         <div class="book-panel ask">
-          <div class="legend" title="Bar length shows size ÷ threshold; color intensifies as ratio grows">
-            <span class="chip chip-neutral">&lt;1×</span>
-            <span class="chip chip-warn">1.0–1.5×</span>
-            <span class="chip chip-hot">1.5–2.0×</span>
-            <span class="chip chip-danger">≥2×</span>
-          </div>
-          <!-- mini DOM history heatmap (asks) -->
-          <canvas
-            id="domHistoryAsk"
-            class="dom-history dom-history-ask"
-            aria-hidden="true">
-          </canvas>
           <table id="bookTableAsk">
             <thead>
               <tr>

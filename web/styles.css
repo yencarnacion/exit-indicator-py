@@ -181,27 +181,27 @@ button.secondary { background: #203047; color: #dbe6f2; }
 }
 .book-panel.bid { border-color: var(--good); }
 .book-panel.ask { border-color: var(--danger); }
-.book-panel .legend { margin-bottom: 8px; }
+.l2-legend { margin-bottom: 8px; }
 
-/* --- DOM history mini heatmaps (10×N per side) --- */
-.dom-history {
+/* --- 1m volume strip (full width) --- */
+.vol1m-wrap {
+  border: 1px solid #1b2737;
+  border-radius: 6px;
+  background: #050910;
+  padding: 6px;
+  margin-bottom: 12px;
+}
+.vol1m {
   display: block;
   width: 100%;
-  height: 48px;
-  margin-bottom: 6px;
-  border-radius: 4px;
-  background: #050910;
-  border: 1px solid #1b2737;
+  height: 64px; /* tuned for split-second readability without pushing DOM down too far */
 }
-.dom-history-bid {
-  box-shadow: inset 0 0 0 1px rgba(46,204,113,0.12);
+body.compact .vol1m-wrap {
+  padding: 4px;
+  margin-bottom: 8px;
 }
-.dom-history-ask {
-  box-shadow: inset 0 0 0 1px rgba(255,107,107,0.12);
-}
-body.compact .dom-history {
-  height: 32px;
-  margin-bottom: 4px;
+body.compact .vol1m {
+  height: 44px;
 }
 
 /* Force identical heights for alignment */
@@ -289,7 +289,7 @@ body.compact .obi-mini canvas { height: 30px; }  /* tighter in compact mode */
   display: flex;
   align-items: stretch;
   justify-content: center;
-  padding-top: 18px; /* roughly aligns with table headers */
+  padding-top: 34px; /* aligns with table header row now that top mini-graphs are removed */
 }
 .footprint-strip table {
   border-collapse: collapse;
@@ -315,7 +315,7 @@ body.compact .obi-mini canvas { height: 30px; }  /* tighter in compact mode */
   background: #131a26;
 }
 body.compact .footprint-strip {
-  padding-top: 10px;
+  padding-top: 26px;
 }
 body.compact .footprint-cell {
   width: 18px;

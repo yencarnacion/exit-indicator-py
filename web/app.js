@@ -11,9 +11,10 @@
     bookBidBody: document.querySelector('#bookTableBid tbody'),
     bookAskBody: document.querySelector('#bookTableAsk tbody'),
 
-    /* NEW: DOM history canvases + footprint strip */
-    domHistBid: document.getElementById('domHistoryBid'),
-    domHistAsk: document.getElementById('domHistoryAsk'),
+    // NEW: 1m volume strip (full width)
+    vol1mCanvas: document.getElementById('vol1mCanvas'),
+
+    /* footprint strip */
     footprintBody: document.getElementById('footprintBody'),
 
     log: document.getElementById('alertLog'),
@@ -38,8 +39,7 @@
     actionHintPill: document.getElementById('actionHintPill'),
   };
 
-  // --- DOM history + orderflow state (client-side only) ---
-  const DOM_HISTORY_LEN = 60;            // number of DOM snapshots per side
+  // --- Orderflow state (client-side only) ---
   const BUBBLE_LIFETIME_MS = 1500;       // big-trade bubble lifetime
   const FOOTPRINT_WINDOW_MS = 5000;      // recent-flow window for footprint
 
@@ -58,12 +58,10 @@
   // Last DOM snapshot (top 10 per side) for trade → DOM mapping
   let currentBook = { bids: [], asks: [] };
 
-  // DOM history heatmap instances per side
-  let domHistBidChart = null;
-  let domHistAskChart = null;
-
   // --- OBI mini chart handle ---
   let obiChart = null;
+  // --- 1m volume chart handle ---
+  let vol1mChart = null;
   let ws;
   let audio;
   let audioReady = false;
@@ -366,6 +364,8 @@
           if (els.vol && d.volume != null) {
             els.vol.textContent = formatVolumeK(d.volume);
           }
+          // Feed 1m volume chart (uses cumulative day volume deltas + last)
+          onMarketPulse({ last: d.last, volume: d.volume, timeISO: d.timeISO });
         } else if (msg.type === 'book') {
           if (msg.data.side) setBookTitle(msg.data.side);
           // New payload: both sides + stats
@@ -729,20 +729,6 @@
     currentBook.bids = Array.isArray(data.bids) ? data.bids.slice(0, 10) : [];
     currentBook.asks = Array.isArray(data.asks) ? data.asks.slice(0, 10) : [];
 
-    // DOM history mini heatmaps (per side)
-    if (domHistBidChart || domHistAskChart) {
-      const bidVec = buildDomSnapshot(currentBook.bids);
-      const askVec = buildDomSnapshot(currentBook.asks);
-      if (domHistBidChart) {
-        domHistBidChart.push(bidVec);
-        domHistBidChart.draw();
-      }
-      if (domHistAskChart) {
-        domHistAskChart.push(askVec);
-        domHistAskChart.draw();
-      }
-    }
-
     // Age out expired bubbles
     pruneBubbles(Date.now());
 
@@ -779,6 +765,9 @@
     if (els.spread)  els.spread.textContent  = fmtP(sp);
     if (els.last)    els.last.textContent    = fmtP(s.last);
     if (els.vol)     els.vol.textContent     = formatVolumeK(s.volume);
+
+    // Feed 1m volume chart from book stats too (useful when only DOM snapshots are active)
+    onMarketPulse({ last: s.last, volume: s.volume, timeISO: s.timeISO });
     // OBI (−1..+1): quick mean-reversion read
     const obiEl = document.getElementById('obiVal');
     if (obiEl) {
@@ -903,6 +892,7 @@
     if (els.vol && q && q.volume != null) {
       els.vol.textContent = formatVolumeK(q.volume);
     }
+    onMarketPulse({ last: q.last, volume: q.volume, timeISO: q.timeISO });
   }
   function tsRow(ev){
     const row = document.createElement('div');
@@ -959,6 +949,8 @@
     if (els.vol && ev && ev.volume != null) {
       els.vol.textContent = formatVolumeK(ev.volume);
     }
+    // Use actual trade price when available for candle direction
+    onMarketPulse({ price: ev.price, last: ev.last, volume: ev.volume, timeISO: ev.timeISO });
 
     // Feed DOM bubbles + micro-footprint accumulators
     updateOrderflowFromTrade(ev);
@@ -1167,18 +1159,16 @@
       document.body.classList.toggle('compact', els.compact.checked);
       localStorage.setItem('ei.compact', els.compact.checked ? '1' : '0');
 
+      // Re-layout volume canvas when height changes
+      if (vol1mChart && typeof vol1mChart.resize === 'function') {
+        vol1mChart.resize();
+        vol1mChart.draw();
+      }
+
       // Re-layout canvases when height changes
       if (obiChart && typeof obiChart.resize === 'function') {
         obiChart.resize();
         obiChart.draw();
-      }
-      if (domHistBidChart && typeof domHistBidChart.resize === 'function') {
-        domHistBidChart.resize();
-        domHistBidChart.draw();
-      }
-      if (domHistAskChart && typeof domHistAskChart.resize === 'function') {
-        domHistAskChart.resize();
-        domHistAskChart.draw();
       }
     });
   }
@@ -1192,8 +1182,8 @@
   });
   // Boot
   initConfig().then(() => {
+    initVol1mChart();
     initObiMiniChart();
-    initDomHistoryCharts();
     connectWS();
   });
 
@@ -1201,6 +1191,307 @@
   function cssVar(name, fallback) {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return v || fallback;
+  }
+
+  // --------- 1m volume chart implementation ----------
+  function _parseTimeISO(timeISO) {
+    if (!timeISO || typeof timeISO !== 'string') return null;
+    const t = Date.parse(timeISO);
+    return Number.isFinite(t) ? t : null;
+  }
+
+  function onMarketPulse({ price, last, volume, timeISO } = {}) {
+    if (!vol1mChart) return;
+    const ts = _parseTimeISO(timeISO) || Date.now();
+    const px = (price != null) ? price : last;
+    vol1mChart.ingest(px, volume, ts);
+  }
+
+  class Vol1mChart {
+    constructor(canvas, opts = {}) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d');
+      this.step = opts.step || 25000;           // 25k increments
+      this.viewBars = opts.viewBars || 24;      // visible window
+      this.maxBars = opts.maxBars || 240;       // keep a few hours
+
+      this.bars = []; // finalized bars: {t0, open, close, vol}
+      this.cur = null; // current minute bar (not yet finalized)
+
+      this.lastCumVol = NaN;   // last known cumulative day volume (monotonic-clamped)
+      this.lastPrice = NaN;    // last known price for gap-filling/open defaults
+
+      this.bg = '#050910';
+      this.grid = cssVar('--obi-grid', '#223149');
+      this.axis = cssVar('--muted', '#98a6b3');
+      this.up = cssVar('--good', '#2ecc71');
+      this.down = cssVar('--danger', '#ff6b6b');
+      this.flat = cssVar('--muted', '#98a6b3');
+      this.text = cssVar('--text', '#e6edf3');
+
+      this.dpr = 1;
+      this._raf = 0;
+      this.resize();
+      window.addEventListener('resize', () => { this.resize(); this.draw(); });
+    }
+
+    resize() {
+      const rect = this.canvas.getBoundingClientRect();
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      this.dpr = dpr;
+      this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    }
+
+    requestDraw() {
+      if (this._raf) return;
+      this._raf = requestAnimationFrame(() => {
+        this._raf = 0;
+        this.draw();
+      });
+    }
+
+    _pushFinal(bar) {
+      if (!bar) return;
+      const open = Number.isFinite(bar.open) ? bar.open : (Number.isFinite(bar.close) ? bar.close : NaN);
+      const close = Number.isFinite(bar.close) ? bar.close : open;
+      const vol = Number.isFinite(bar.vol) ? Math.max(0, bar.vol) : 0;
+      this.bars.push({ t0: bar.t0, open, close, vol });
+      if (this.bars.length > this.maxBars) {
+        this.bars.splice(0, this.bars.length - this.maxBars);
+      }
+    }
+
+    _rollTo(minute0) {
+      const prev = this.cur;
+      if (prev) {
+        this._pushFinal(prev);
+      }
+
+      // Fill missing minutes with 0-volume bars so the 5-min markers stay stable.
+      if (prev && minute0 > prev.t0 + 60000) {
+        const prevClose = Number.isFinite(prev.close) ? prev.close : (Number.isFinite(prev.open) ? prev.open : this.lastPrice);
+        let t = prev.t0 + 60000;
+        while (t < minute0) {
+          this._pushFinal({ t0: t, open: prevClose, close: prevClose, vol: 0 });
+          t += 60000;
+        }
+      }
+
+      const baseVol = Number.isFinite(this.lastCumVol) ? this.lastCumVol : NaN;
+      const openPx = Number.isFinite(this.lastPrice) ? this.lastPrice : NaN;
+      this.cur = {
+        t0: minute0,
+        baseVol,
+        open: openPx,
+        close: openPx,
+        vol: 0,
+      };
+    }
+
+    ingest(price, cumVol, tsMs) {
+      const ts = Number.isFinite(tsMs) ? tsMs : Date.now();
+      const minute0 = Math.floor(ts / 60000) * 60000;
+
+      const px = Number(price);
+      if (Number.isFinite(px)) this.lastPrice = px;
+
+      let v = Number(cumVol);
+      if (!Number.isFinite(v) || v < 0) v = NaN;
+      if (Number.isFinite(v)) {
+        // clamp to monotonic (IB official volume updates can occasionally “snap”)
+        if (Number.isFinite(this.lastCumVol)) v = Math.max(v, this.lastCumVol);
+        this.lastCumVol = v;
+      }
+
+      if (!this.cur || this.cur.t0 !== minute0) {
+        this._rollTo(minute0);
+      }
+
+      const bar = this.cur;
+
+      // open/close from last price stream (trade price preferred when present)
+      if (Number.isFinite(px)) {
+        if (!Number.isFinite(bar.open)) bar.open = px;
+        bar.close = px;
+      } else if (Number.isFinite(this.lastPrice)) {
+        if (!Number.isFinite(bar.open)) bar.open = this.lastPrice;
+        bar.close = this.lastPrice;
+      }
+
+      // volume = cumulative delta from minute baseline
+      if (Number.isFinite(v)) {
+        if (!Number.isFinite(bar.baseVol)) bar.baseVol = v;
+        bar.vol = Math.max(0, v - bar.baseVol);
+      }
+
+      this.requestDraw();
+    }
+
+    _seriesForDraw() {
+      const out = this.bars.slice();
+      if (this.cur) out.push({ t0: this.cur.t0, open: this.cur.open, close: this.cur.close, vol: this.cur.vol });
+      return out;
+    }
+
+    _fmtK(n) {
+      // 25000 -> "25.0k"
+      const x = Number(n) || 0;
+      return (x / 1000).toFixed(1) + 'k';
+    }
+
+    _fmtTimeLabel(t0) {
+      const dt = new Date(t0);
+      // "9:35" style (strip AM/PM if locale adds it)
+      const s = dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      return String(s).split(' ')[0];
+    }
+
+    draw() {
+      const ctx = this.ctx;
+      const rect = this.canvas.getBoundingClientRect();
+      const W = rect.width || 1;
+      const H = rect.height || 1;
+      const dpr = this.dpr || 1;
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+
+      // background
+      ctx.fillStyle = this.bg;
+      ctx.fillRect(0, 0, W, H);
+
+      const compact = document.body.classList.contains('compact');
+      const fontSize = compact ? 10 : 11;
+      ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace`;
+
+      const padL = 6;
+      const padR = 52;  // space for right-axis labels
+      const padT = 6;
+      const padB = compact ? 16 : 18; // time labels
+
+      const innerW = Math.max(1, W - padL - padR);
+      const innerH = Math.max(1, H - padT - padB);
+      const xL = padL;
+      const yT = padT;
+      const yB = padT + innerH;
+
+      const seriesAll = this._seriesForDraw();
+      const nAll = seriesAll.length;
+      if (!nAll) {
+        // draw an empty baseline
+        ctx.strokeStyle = this.grid;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath(); ctx.moveTo(xL, yB); ctx.lineTo(xL + innerW, yB); ctx.stroke();
+        ctx.restore();
+        return;
+      }
+
+      const viewN = Math.max(6, Math.min(this.viewBars, nAll));
+      const series = seriesAll.slice(nAll - viewN);
+
+      let maxVol = 0;
+      for (const b of series) maxVol = Math.max(maxVol, Number(b.vol) || 0);
+      const step = this.step;
+      const maxY = Math.max(step, (Math.ceil(maxVol / step) + 1) * step); // +25k headroom
+
+      // grid + right-axis labels (0..maxY step 25k)
+      ctx.strokeStyle = this.grid;
+      ctx.fillStyle = this.axis;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.9;
+
+      const ticks = Math.floor(maxY / step);
+      for (let i = 0; i <= ticks; i++) {
+        const v = i * step;
+        const y = yB - (v / maxY) * innerH;
+        ctx.globalAlpha = (v === 0) ? 0.65 : 0.85;
+        ctx.beginPath();
+        ctx.moveTo(xL, y + 0.5);
+        ctx.lineTo(xL + innerW, y + 0.5);
+        ctx.stroke();
+
+        // label on right
+        ctx.globalAlpha = 0.95;
+        const label = (v === 0) ? '0' : this._fmtK(v);
+        ctx.fillText(label, xL + innerW + 6, y + 4);
+      }
+
+      // bars geometry (right-aligned, like most platforms)
+      const gap = 1;
+      const bw = Math.max(3, Math.floor((innerW - gap * (viewN - 1)) / viewN));
+      const totalW = bw * viewN + gap * (viewN - 1);
+      const x0 = xL + (innerW - totalW);
+
+      for (let i = 0; i < viewN; i++) {
+        const b = series[i];
+        const vol = Math.max(0, Number(b.vol) || 0);
+        const open = Number(b.open);
+        const close = Number(b.close);
+
+        let c = this.flat;
+        if (Number.isFinite(open) && Number.isFinite(close)) {
+          if (close > open) c = this.up;
+          else if (close < open) c = this.down;
+        }
+
+        const h = (vol / maxY) * innerH;
+        const x = x0 + i * (bw + gap);
+        const y = yB - h;
+
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = c;
+        ctx.fillRect(x, y, bw, h);
+
+        // subtle outline for the max bar(s)
+        if (maxVol > 0 && vol >= maxVol) {
+          ctx.globalAlpha = 0.55;
+          ctx.strokeStyle = this.text;
+          ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, bw - 1), Math.max(1, h - 1));
+        }
+      }
+
+      // time markers every 5 minutes + date marker at left
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = this.axis;
+      const date0 = new Date(series[0].t0);
+      const dateLabel = date0.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
+      ctx.fillText(dateLabel, x0, H - 4);
+
+      for (let i = 0; i < viewN; i++) {
+        const b = series[i];
+        const t0 = b.t0;
+        if (!Number.isFinite(t0)) continue;
+        const dt = new Date(t0);
+        const m = dt.getMinutes();
+        if ((m % 5) !== 0) continue;
+
+        const label = this._fmtTimeLabel(t0);
+        const x = x0 + i * (bw + gap) + bw * 0.5;
+        // small tick
+        ctx.globalAlpha = 0.55;
+        ctx.strokeStyle = this.axis;
+        ctx.beginPath();
+        ctx.moveTo(x, yB + 2);
+        ctx.lineTo(x, yB + 6);
+        ctx.stroke();
+        // label
+        ctx.globalAlpha = 0.95;
+        ctx.textAlign = 'center';
+        ctx.fillText(label, x, H - 4);
+        ctx.textAlign = 'start';
+      }
+
+      ctx.restore();
+    }
+  }
+
+  function initVol1mChart() {
+    const c = els.vol1mCanvas;
+    if (!c) return;
+    vol1mChart = new Vol1mChart(c, { step: 25000, viewBars: 24, maxBars: 240 });
+    vol1mChart.draw(); // skeleton immediately
   }
   class ObiMiniChart {
     constructor(canvas, opts = {}) {
@@ -1334,116 +1625,4 @@
     obiChart.draw();
   }
 
-  // --------- DOM history mini heatmap implementation ----------
-  class DomHistoryHeatmap {
-    constructor(canvas, side, opts = {}) {
-      this.canvas = canvas;
-      this.ctx = canvas.getContext('2d');
-      this.side = side;
-      this.levels = opts.levels || 10;
-      this.maxSnapshots = opts.maxSnapshots || DOM_HISTORY_LEN;
-      this.data = new Array(this.maxSnapshots); // ring buffer of Float32Array(levels)
-      this.len = 0;
-      this.head = 0;
-      this.dpr = 1;
-      this.bg = '#050910';
-
-      const bidColor = cssVar('--dom-bid', 'rgba(79,179,255,1)');
-      const askColor = cssVar('--dom-ask', 'rgba(255,123,123,1)');
-      this.baseColor = (side === 'BID') ? bidColor : askColor;
-
-      this.resize();
-      window.addEventListener('resize', () => { this.resize(); this.draw(); });
-    }
-    push(vec) {
-      if (!(vec instanceof Float32Array)) {
-        vec = new Float32Array(vec);
-      }
-      if (vec.length !== this.levels) {
-        const v = new Float32Array(this.levels);
-        const copyLen = Math.min(this.levels, vec.length);
-        for (let i = 0; i < copyLen; i++) v[i] = vec[i];
-        vec = v;
-      }
-      this.data[this.head] = vec;
-      this.head = (this.head + 1) % this.maxSnapshots;
-      if (this.len < this.maxSnapshots) this.len++;
-    }
-    resize() {
-      if (!this.canvas) return;
-      const rect = this.canvas.getBoundingClientRect();
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
-      this.dpr = dpr;
-      this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-      this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-    }
-    _parseBaseColor() {
-      const ctx = this.ctx;
-      ctx.save();
-      ctx.fillStyle = this.baseColor;
-      const computed = ctx.fillStyle;
-      ctx.restore();
-      const m = computed.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-      if (!m) return { r: 79, g: 179, b: 255 };
-      return { r: +m[1], g: +m[2], b: +m[3] };
-    }
-    draw() {
-      const ctx = this.ctx;
-      if (!ctx) return;
-      const rect = this.canvas.getBoundingClientRect();
-      const Wcss = rect.width || 1;
-      const Hcss = rect.height || 1;
-      const dpr = this.dpr || 1;
-
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, Wcss, Hcss);
-
-      // background
-      ctx.fillStyle = this.bg;
-      ctx.fillRect(0, 0, Wcss, Hcss);
-
-      const n = this.len;
-      if (!n) {
-        ctx.restore();
-        return;
-      }
-
-      const levels = this.levels;
-      const cellW = Wcss / this.maxSnapshots;
-      const cellH = Hcss / levels;
-      const x0 = Wcss - n * cellW; // right-align snapshots
-
-      const { r, g, b } = this._parseBaseColor();
-
-      for (let i = 0; i < n; i++) {
-        const idx = (this.head - n + i + this.maxSnapshots) % this.maxSnapshots;
-        const vec = this.data[idx];
-        if (!vec) continue;
-        const x = x0 + i * cellW;
-        for (let level = 0; level < levels; level++) {
-          const v = Math.max(0, Math.min(1, vec[level] || 0));
-          if (v <= 0) continue;
-          const y = level * cellH;
-          const alpha = 0.12 + 0.88 * v;
-          ctx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`;
-          ctx.fillRect(x, y, cellW + 0.5, cellH + 0.5);
-        }
-      }
-      ctx.restore();
-    }
-  }
-
-  function initDomHistoryCharts() {
-    const bidCanvas = els.domHistBid;
-    const askCanvas = els.domHistAsk;
-    if (bidCanvas) {
-      domHistBidChart = new DomHistoryHeatmap(bidCanvas, 'BID', { maxSnapshots: DOM_HISTORY_LEN, levels: 10 });
-      domHistBidChart.draw();
-    }
-    if (askCanvas) {
-      domHistAskChart = new DomHistoryHeatmap(askCanvas, 'ASK', { maxSnapshots: DOM_HISTORY_LEN, levels: 10 });
-      domHistAskChart.draw();
-    }
-  }
 })();
