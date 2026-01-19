@@ -1,3 +1,4 @@
+# server_py/app.py
 from __future__ import annotations
 import asyncio
 import time as _time
@@ -22,13 +23,12 @@ from .ib_client import IBConfig, IBDepthManager
 from .obi import compute_obi, choose_alpha_heuristic
 from .recording import NDJSONRecorder
 from .replay import PlaybackManager, ReplayConfig
+from .rvol import RVOLManager, RVOLAlert
 
 # Debug flag: Set to True to enable detailed debug logging
 DEBUG = False
-
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "./config.tws.yaml")
 cfg = Config.load(CONFIG_PATH)
-
 # --- DOM outlier clamp (recommended) -----------------------------------------
 def _pct_band() -> float:
     try:
@@ -76,16 +76,18 @@ def _filter_dom_outliers(asks: list[DepthLevel], bids: list[DepthLevel]) -> tupl
 def _is_true(x) -> bool:
     s = str(x).strip().lower()
     return s in ("1", "true", "yes", "on", "debug")
+
 TNS_DEBUG = _is_true(os.getenv("EI_TNS_DEBUG", "")) or _is_true(os.getenv("EI_DEBUG", "")) \
             or (str(getattr(cfg, "log_level", "")).lower() == "debug")
+
 def tns_log(msg: str):
     """Thread-safe debug logger that works in both the main loop and AnyIO worker threads."""
     if not TNS_DEBUG:
         return
     try:
-        ts = asyncio.get_running_loop().time()   # fast, monotonic, event-loop time
+        ts = asyncio.get_running_loop().time() # fast, monotonic, event-loop time
     except RuntimeError:
-        ts = _time.perf_counter()                # fallback in threadpool
+        ts = _time.perf_counter() # fallback in threadpool
     print(f"[TNS {ts:.3f}] {msg}", flush=True)
 
 # --- state & wiring ---
@@ -94,23 +96,19 @@ ws_clients: Set[WebSocket] = set()
 ws_lock = asyncio.Lock()
 # Sound
 _snd = sound_info(cfg.sound_file)
-
 # Recording / playback setup
 REC_PATH = os.getenv("EI_RECORD_TO", "").strip()
 REPLAY_FROM = os.getenv("EI_REPLAY_FROM", "").strip()
 REPLAY_RATE = float(os.getenv("EI_REPLAY_RATE", "1.0"))
 REPLAY_LOOP = os.getenv("EI_REPLAY_LOOP", "0").lower() in ("1","true","yes","on")
-
 recorder: NDJSONRecorder | None = None
-
 # --- T&S queues (prevents create_task-per-tick overload) ---
-TNS_Q_MAX = int(os.getenv("EI_TNS_QUEUE_MAX", "0") or "0")  # 0 = unbounded
+TNS_Q_MAX = int(os.getenv("EI_TNS_QUEUE_MAX", "0") or "0") # 0 = unbounded
 _trade_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=TNS_Q_MAX) if TNS_Q_MAX > 0 else asyncio.Queue()
 _quote_q: asyncio.Queue[tuple[float | None, float | None]] = (
     asyncio.Queue(maxsize=TNS_Q_MAX) if TNS_Q_MAX > 0 else asyncio.Queue()
 )
 _MAIN_LOOP: asyncio.AbstractEventLoop | None = None
-
 def _q_put_drop_old(q: asyncio.Queue, item) -> None:
     try:
         q.put_nowait(item)
@@ -188,9 +186,34 @@ else:
         on_tape_trade=lambda ev: enqueue_trade(ev),
     )
 
+# RVOL Manager
+rvol_manager = RVOLManager(lookback_days=cfg.rvol_lookback_days, threshold=cfg.rvol_threshold)
+
+async def _rvol_backfill_when_ready(sym: str) -> None:
+    """
+    Ensure RVOL backfill runs once IB + contract are ready.
+    This prevents the 'start before connect' case from silently skipping RVOL forever.
+    """
+    if not getattr(cfg, "rvol_enabled", True):
+        return
+    ib = getattr(manager, "ib", None)
+    if ib is None:
+        return  # replay/offline manager
+    # Wait briefly for contract to appear (qualifyContractsAsync happens during subscribe)
+    for _ in range(200):
+        if state.symbol != sym:
+            return
+        c = getattr(manager, "_contract", None)
+        try:
+            if c is not None and ib.isConnected():
+                await rvol_manager.start_symbol(ib, c, sym, preserve_live_state=True)
+                return
+        except Exception:
+            pass
+        await asyncio.sleep(0.1)
+
 # --- periodic stats heartbeat (default: every 1.0s; override via EI_STATS_HEARTBEAT_SEC) ---
 HEARTBEAT_SECONDS = float(os.getenv("EI_STATS_HEARTBEAT_SEC", "1.0") or "1.0")
-
 async def _stats_heartbeat():
     """
     Push a tiny 'stats' frame with last/volume at a fixed cadence so the UI
@@ -213,16 +236,13 @@ async def _stats_heartbeat():
 async def lifespan(app: FastAPI):
     global recorder
     global _MAIN_LOOP
-
     # Lazily create the recorder only once the event loop is definitely running
     if REC_PATH:
         recorder = NDJSONRecorder(
             REC_PATH,
             meta={"started_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())},
         )
-
     _MAIN_LOOP = asyncio.get_running_loop()
-
     mgr_task = asyncio.create_task(manager.run())
     hb_task = asyncio.create_task(_stats_heartbeat())
     quote_task = asyncio.create_task(_quote_worker())
@@ -247,20 +267,25 @@ async def lifespan(app: FastAPI):
             await recorder.close()
 
 app = FastAPI(lifespan=lifespan)
+
 # --- static assets (serve existing ./web) ---
 WEB_DIR = Path("web")
 @app.get("/", include_in_schema=False)
 def _index():
     return FileResponse(WEB_DIR / "index.html")
+
 @app.get("/index.html", include_in_schema=False)
 def _index2():
     return FileResponse(WEB_DIR / "index.html")
+
 @app.get("/app.js", include_in_schema=False)
 def _appjs():
     return FileResponse(WEB_DIR / "app.js")
+
 @app.get("/styles.css", include_in_schema=False)
 def _css():
     return FileResponse(WEB_DIR / "styles.css")
+
 @app.get("/sounds/{filename}", include_in_schema=False)
 def _sound(filename: str):
     path = WEB_DIR / "sounds" / filename
@@ -285,9 +310,9 @@ def _sw():
     # always revalidate SW
     headers = {"Cache-Control": "no-cache"}
     return FileResponse(p, headers=headers, media_type="application/javascript")
+
 # --- YAML endpoints ---
 CONFIG_DATA_DIR = Path("./config-data")
-
 def _read_yaml_or_default(filename: str, default_text: str) -> str:
     try:
         if CONFIG_DATA_DIR.exists():
@@ -372,6 +397,7 @@ def yaml_dollar_values():
     except Exception:
         pass
     return PlainTextResponse(txt, media_type="text/yaml")
+
 # --- API models ---
 class StartReq(BaseModel):
     symbol: str
@@ -381,20 +407,25 @@ class StartReq(BaseModel):
     dollar: Optional[int] = None
     bigDollar: Optional[int] = None
     silent: Optional[bool] = None
+
 class ThresholdReq(BaseModel):
     threshold: int
+
 class SideReq(BaseModel):
     side: str
+
 class SilentReq(BaseModel):
     silent: bool
 
 class MicroVWAPReq(BaseModel):
     minutes: float
     band_k: float
+
 # --- API routes ---
 @app.get("/api/health")
 def api_health():
     return {"ok": True, "connected": state.connected}
+
 @app.get("/api/config")
 def api_config():
     tns_log("GET /api/config")
@@ -412,7 +443,7 @@ def api_config():
         "silent": state.silent,
         "dollarThreshold": state.dollar_threshold,
         "bigDollarThreshold": state.big_dollar_threshold,
-        "soundsPath": "/sounds/",  # base for ticksonic wavs
+        "soundsPath": "/sounds/", # base for ticksonic wavs
         # OBI indicator config
         "obi": {
             "enabled": bool(getattr(cfg, "obi_enabled", True)),
@@ -432,7 +463,13 @@ def api_config():
             ),
             "bandK": getattr(manager, "_micro_band_k", 2.0),
         },
+        "rvol": {
+            "enabled": bool(getattr(cfg, "rvol_enabled", True)),
+            "threshold": float(getattr(cfg, "rvol_threshold", 2.0)),
+            "lookbackDays": int(getattr(cfg, "rvol_lookback_days", 10)),
+        },
     }
+
 @app.post("/api/start")
 async def api_start(req: StartReq):
     sym = state.set_symbol(req.symbol)
@@ -451,10 +488,27 @@ async def api_start(req: StartReq):
     tns_log(f"POST /api/start sym={state.symbol} side={state.side} "
             f"thrShares={state.threshold} $thr={state.dollar_threshold} $big={state.big_dollar_threshold} "
             f"silent={state.silent}")
+
+    # RVOL: reset immediately on symbol change so trades can't be attributed to the old symbol.
+    # Also start counting prints immediately; baseline backfill happens async.
+    if getattr(cfg, "rvol_enabled", True):
+        try:
+            if getattr(rvol_manager, "active_symbol", "") != sym:
+                rvol_manager.reset()
+                rvol_manager.active_symbol = sym
+        except Exception:
+            pass
+
     # Allow starts even if not yet connected, to match dev affordance
     await manager.subscribe_symbol(sym)
+    
+    # Trigger RVOL backfill (robust to delayed connect/contract qualification)
+    if getattr(cfg, "rvol_enabled", True):
+        asyncio.create_task(_rvol_backfill_when_ready(sym))
+    
     await broadcast_status(state.connected)
     return {"ok": True, "symbol": state.symbol, "threshold": state.threshold, "side": state.side}
+
 @app.post("/api/stop")
 async def api_stop():
     tns_log("POST /api/stop")
@@ -464,8 +518,14 @@ async def api_stop():
     _last_bid = None
     _last_ask = None
     await manager.unsubscribe()
+    # Clear RVOL state too (prevents cross-symbol leakage)
+    try:
+        rvol_manager.reset()
+    except Exception:
+        pass
     await broadcast_status(state.connected)
     return {"ok": True}
+
 @app.post("/api/threshold")
 async def api_threshold(req: ThresholdReq):
     if req.threshold < 1:
@@ -473,6 +533,7 @@ async def api_threshold(req: ThresholdReq):
     state.set_threshold(req.threshold)
     tns_log(f"POST /api/threshold => {state.threshold}")
     return {"ok": True, "threshold": state.threshold}
+
 @app.post("/api/side")
 async def api_side(req: SideReq):
     s = state.set_side(req.side)
@@ -491,8 +552,8 @@ async def api_microvwap(req: MicroVWAPReq):
     Configure micro-VWAP window (minutes) and band multiplier k.
     Keeps logic on server so stats + hints match the UI.
     """
-    minutes = max(0.5, min(float(req.minutes), 60.0))  # clamp 0.5–60 min
-    band_k = max(0.5, min(float(req.band_k), 4.0))     # clamp 0.5–4σ
+    minutes = max(0.5, min(float(req.minutes), 60.0)) # clamp 0.5–60 min
+    band_k = max(0.5, min(float(req.band_k), 4.0)) # clamp 0.5–4σ
     # Persist on manager if supported
     if hasattr(manager, "set_micro_window_minutes"):
         manager.set_micro_window_minutes(minutes)
@@ -500,6 +561,7 @@ async def api_microvwap(req: MicroVWAPReq):
     setattr(manager, "_micro_band_k", band_k)
     tns_log(f"POST /api/microvwap => minutes={minutes} band_k={band_k}")
     return {"ok": True, "minutes": minutes, "band_k": band_k}
+
 # --- WebSocket ---
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -516,9 +578,11 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         async with ws_lock:
             ws_clients.discard(ws)
+
 # --- Broadcast helpers ---
 async def send_json(ws: WebSocket, payload: Dict):
     await ws.send_text(json.dumps(payload, separators=(",", ":")))
+
 async def broadcast(payload: Dict):
     stale = []
     async with ws_lock:
@@ -536,9 +600,11 @@ async def broadcast(payload: Dict):
                 stale.append(ws)
         for ws in stale:
             ws_clients.discard(ws)
+
 async def broadcast_status(connected: bool):
     state.set_connected(connected)
     await broadcast({"type": "status", "data": {"connected": connected, "symbol": state.symbol, "side": state.side}})
+
 async def broadcast_book(levels: list[AggregatedLevel], side: str):
     # (Deprecated single-side broadcaster retained for back-compat)
     data = [{"price": float(l.price), "sumShares": l.sumShares, "rank": l.rank} for l in levels]
@@ -560,7 +626,6 @@ async def broadcast_book_full(
             micro_vwap, micro_sigma = manager._micro_vwap_and_sigma()
     except Exception:
         micro_vwap, micro_sigma = None, None
-
     # Simple action hint: compact, mutually exclusive, glanceable
     def _compute_action_hint():
         if last is not None:
@@ -581,7 +646,6 @@ async def broadcast_book_full(
         # Rough thresholds: significant extension when |dist| > band
         # Use OBI to gate "ok to fade" vs "trend".
         o = obi if obi is not None else 0.0
-
         # Long fade ok: below lower band, selling not dominant
         if dist <= -band and o > -0.1:
             return "long_ok"
@@ -595,9 +659,7 @@ async def broadcast_book_full(
         if dist <= -band and o <= -0.3:
             return "trend_down"
         return None
-
     action_hint = _compute_action_hint()
-
     stats = {
         "bestBid": float(best_bid) if best_bid is not None else None,
         "bestAsk": float(best_ask) if best_ask is not None else None,
@@ -621,15 +683,35 @@ async def broadcast_book_full(
             "stats": stats
         }
     })
+
 async def broadcast_alert(a: AlertEvent):
     await broadcast({"type": "alert", "data": {
         "side": a.side, "symbol": a.symbol, "price": float(a.price),
         "sumShares": a.sumShares, "timeISO": a.timeISO
     }})
+
 async def broadcast_error(msg: str):
     # NEW: Ignore harmless Error 310
     if "Error 310" not in msg:
         await broadcast({"type": "error", "data": {"message": msg}})
+
+async def broadcast_rvol_alert(alert: RVOLAlert):
+    await broadcast({"type": "rvol_alert", "data": {
+        "symbol": alert.symbol,
+        "price": alert.price,
+        "volume": alert.volume,
+        "baseline": alert.baseline,
+        "rvol": float(f"{alert.rvol:.2f}"),
+        "percentile": int(alert.percentile),
+        "samples": alert.samples,
+        "nonzero": alert.nonzero,
+        "pace": alert.pace,
+        "elapsedSec": alert.elapsed_sec,
+        "time": alert.time_str,
+        "projectedVolume": alert.projected_volume,
+        "projectedPercentile": (int(alert.projected_percentile) if alert.projected_percentile is not None else None),
+    }})
+
 # --- DOM → aggregation glue ---
 async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthLevel]):
     if recorder:
@@ -648,19 +730,16 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
         print(f"DEBUG: Aggregated both books. Asks: {len(ask_book)}, Bids: {len(bid_book)}, Alerts: {len(alerts)}")
     # Pull last/volume from IB manager
     last, volume = manager.current_quote()
-
     # --- Sanity guard: if DOM best is clearly wrong, trust NBBO (tick-by-tick) ---
     try:
         use_nbbo = False
         band = _pct_band()
-
         def _bad(px, ref):
             try:
                 return (px is None) or (float(px) <= 0) or \
                        (abs(float(px) - float(ref)) / max(1e-9, abs(float(ref))) > band)
             except Exception:
                 return True
-
         if _last_bid is not None and _last_ask is not None and _last_ask == _last_ask and _last_bid == _last_bid:
             if best_ask is None or best_bid is None:
                 use_nbbo = True
@@ -668,14 +747,13 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
                 use_nbbo = True
             elif _bad(best_ask, _last_ask) or _bad(best_bid, _last_bid):
                 use_nbbo = True
-
         if use_nbbo:
             best_bid = Decimal(str(_last_bid))
             best_ask = Decimal(str(_last_ask))
     except Exception:
         # Never let the guardrail crash the pipeline
         pass
-
+    
     # --- OBI computation (top ≤3 levels per side) ---
     obi_val = None
     obi_alpha_used = None
@@ -697,8 +775,8 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
     try:
         if best_ask is not None and best_bid is not None and best_ask <= best_bid:
             # Drop any rows that would keep the book crossed
-            ask_book  = [lvl for lvl in ask_book if lvl.price > best_bid]
-            bid_book  = [lvl for lvl in bid_book if lvl.price < best_ask]
+            ask_book = [lvl for lvl in ask_book if lvl.price > best_bid]
+            bid_book = [lvl for lvl in bid_book if lvl.price < best_ask]
             # If nothing left on a side, leave empty; UI will render blanks
         else:
             # If NBBO replacement adjusted bests, trim tables to be consistent
@@ -716,7 +794,6 @@ async def on_dom_snapshot(symbol: str, asks: list[DepthLevel], bids: list[DepthL
         await broadcast_alert(a)
 
 # --- T&S broadcasting (TickSonic-compatible payloads) ---
-
 def _fmt_amount(amount: float) -> tuple[str, bool]:
     # returns (label, is_big_label) — label mirrors TickSonic style
     if amount >= 1_000_000:
@@ -741,10 +818,10 @@ def _classify_trade(price: float, bid: Optional[float], ask: Optional[float]) ->
         return ("between_mid", "white")
     if abs(price - a) < eps: return ("at_ask", "green")
     if abs(price - b) < eps: return ("at_bid", "red")
-    if price > a + eps:      return ("above_ask", "yellow")
-    if price < b - eps:      return ("below_bid", "magenta")
+    if price > a + eps: return ("above_ask", "yellow")
+    if price < b - eps: return ("below_bid", "magenta")
     da = abs(price - a); db = abs(price - b)
-    if abs(da - db) < 1e-9:  return ("between_mid", "white")
+    if abs(da - db) < 1e-9: return ("between_mid", "white")
     return ("between_ask", "white") if da < db else ("between_bid", "white")
 
 # Keep most recent bid/ask seen (from tick-by-tick)
@@ -770,7 +847,7 @@ async def broadcast_trade(ev: dict):
     # Pull inputs
     sym = state.symbol or ev.get("sym") or ""
     price = float(ev.get("price") or 0.0)
-    size  = int(ev.get("size") or 0)
+    size = int(ev.get("size") or 0)
     amount = price * size
     # Threshold filter (T&S only)
     if state.dollar_threshold and amount < state.dollar_threshold:
@@ -799,3 +876,9 @@ async def broadcast_trade(ev: dict):
         "silent": state.silent,
     }
     await broadcast(payload)
+    
+    # Feed RVOL Manager
+    if getattr(cfg, "rvol_enabled", True):
+        alerts = rvol_manager.on_trade(price=price, size=size)
+        for a in alerts:
+            await broadcast_rvol_alert(a)

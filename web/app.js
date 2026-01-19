@@ -37,6 +37,7 @@
     microBandSelect: document.getElementById('microBandSelect'),
     microVwapVal: document.getElementById('microVwapVal'),
     actionHintPill: document.getElementById('actionHintPill'),
+    rvolBadge: document.getElementById('rvolBadge'),
   };
 
   // --- Orderflow state (client-side only) ---
@@ -383,6 +384,8 @@
           onTSQuote(msg);
         } else if (msg.type === 'trade') {
           onTSTrade(msg);
+        } else if (msg.type === 'rvol_alert') {
+          onRVOLAlert(msg.data || {});
         } else if (msg.type === 'error') {
           // MODIFIED: Ignore harmless Error 310
           const m = (msg && msg.data && typeof msg.data.message === 'string') ? msg.data.message : '';
@@ -883,6 +886,79 @@
     prependLogItem(el);
   }
   function fmt2(x){ return (Number.isFinite(+x)?(+x).toFixed(2):'—'); }
+  function fmtX(x){ return (Number.isFinite(+x)?(+x).toFixed(2)+'×':'—'); }
+  function fmtPctl(x){
+    const v = Number(x);
+    return Number.isFinite(v) ? ('p' + Math.max(0, Math.min(100, Math.round(v)))) : 'p—';
+  }
+
+  function appendRVOLAlert(d) {
+    const el = document.createElement('div');
+    const pace = !!d.pace;
+    el.className = 'log-item rvol' + (pace ? ' pace' : '');
+
+    const sym = d.symbol || activeSymbol || '';
+    const r = fmtX(d.rvol);
+    const pct = fmtPctl(d.percentile);
+    const vol = formatShares(Number(d.volume) || 0);
+    const base = formatShares(Math.round(Number(d.baseline) || 0));
+    const t = d.time || '';
+    const tag = pace ? 'pace' : 'close';
+    const extra = pace && d.elapsedSec ? ` @${d.elapsedSec}s` : '';
+
+    // Optional projections (if server sends them)
+    let proj = '';
+    if (pace && d.projectedVolume != null) {
+      const pv = formatShares(Number(d.projectedVolume) || 0);
+      const pp = (d.projectedPercentile != null) ? fmtPctl(d.projectedPercentile) : '';
+      proj = ` proj=${pv}${pp ? ' ' + pp : ''}`;
+    }
+
+    el.textContent = `[${t}] ${sym} RVOL ${tag} ${r} ${pct} vol=${vol} med=${base}${extra}${proj}`;
+    prependLogItem(el);
+  }
+
+  function updateRVOLBadge(d) {
+    const b = els.rvolBadge;
+    if (!b) return;
+    const pace = !!d.pace;
+    const r = Number(d.rvol);
+    const pct = d.percentile;
+    const txt = `RVOL ${fmtX(r)} ${fmtPctl(pct)}`;
+    b.textContent = txt;
+
+    const vol = formatShares(Number(d.volume) || 0);
+    const base = formatShares(Math.round(Number(d.baseline) || 0));
+    const t = d.time || '';
+    const mode = pace ? 'PACE' : 'CLOSE';
+    b.title = `${mode} • ${txt} • vol=${vol} • med=${base} • samples=${d.samples || 0} • ${t}`;
+
+    b.classList.remove('hot','danger','pace','pulse');
+    if (pace) b.classList.add('pace');
+    if (Number.isFinite(r)) {
+      if (r >= 3.0) b.classList.add('danger');
+      else if (r >= 2.0) b.classList.add('hot');
+    }
+    b.classList.add('pulse');
+    setTimeout(() => b.classList.remove('pulse'), 700);
+  }
+
+  function onRVOLAlert(d) {
+    updateRVOLBadge(d);
+    appendRVOLAlert(d);
+
+    // Very short, distinct audio tick (optional). Uses existing T&S engine.
+    if (globalSilent) return;
+    if (TS_AUDIO && TS_AUDIO.engine && typeof TS_AUDIO.engine.tick === 'function') {
+      const pace = !!d.pace;
+      TS_AUDIO.engine.tick({
+        f0: pace ? 2400 : 1600,
+        f1: pace ? 1800 : 1200,
+        gain: 0.06,
+        dur: 0.020,
+      });
+    }
+  }
   function onTSQuote(q){
     const { bid, ask } = q;
     if (els.tapeBid && bid!=null) els.tapeBid.textContent = fmt2(bid);

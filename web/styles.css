@@ -40,6 +40,29 @@ h1 { margin: 0; font-size: 22px; font-weight: 700; }
 .badge-live { background: rgba(46,204,113,0.15); color: var(--good); border: 1px solid rgba(46,204,113,0.3); }
 .badge-disconnected { background: rgba(255,107,107,0.12); color: var(--danger); border: 1px solid rgba(255,107,107,0.3); }
 
+/* --- RVOL badge: scalper-fast HUD --- */
+.badge-rvol {
+  background: rgba(255,184,79,0.10);
+  color: var(--accent2);
+  border: 1px solid rgba(255,184,79,0.28);
+  font-variant-numeric: tabular-nums;
+}
+.badge-rvol.pace::before { content: "⚡ "; }
+.badge-rvol.hot {
+  background: rgba(255,184,79,0.18);
+  border-color: rgba(255,184,79,0.40);
+}
+.badge-rvol.danger {
+  background: rgba(46,204,113,0.16);
+  color: var(--good);
+  border-color: rgba(46,204,113,0.35);
+}
+.badge-rvol.pulse { animation: rvolPulse 0.7s ease-out; }
+@keyframes rvolPulse {
+  0% { box-shadow: 0 0 0 0 rgba(255,184,79,0.65); }
+  100% { box-shadow: 0 0 0 14px rgba(255,184,79,0); }
+}
+
 section { background: var(--panel); border: 1px solid #1b2737; border-radius: 8px; padding: 16px; margin-top: 16px; }
 
 .controls { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
@@ -150,6 +173,10 @@ button.secondary { background: #203047; color: #dbe6f2; }
 }
 .log-item { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 13px; color: var(--text); }
 .log-item.error { color: var(--danger); }
+
+/* RVOL lines are highlighted and instantly distinguishable from L2 alerts */
+.log-item.rvol { color: var(--accent2); }
+.log-item.rvol.pace { color: var(--good); font-weight: 700; }
 
 /* --- Two-panel order book --- */
 .book-stats {
