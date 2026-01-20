@@ -69,6 +69,10 @@
   let soundURL = '';
   let soundAvailable = false;
   let globalSilent = false;
+ 
+  // WebAudio autoplay policy (Chrome/Opera): resume only after a user gesture.
+  let audioUnlocked = false;
+
   // T&S audio UX toggles (persisted)
   let tsMachineGunClicks = true;
   let tsVoiceBigOnly = true;
@@ -149,6 +153,37 @@
       els.compact.checked = savedCompact;
     }
     document.body.classList.toggle('compact', savedCompact);
+  }
+
+  // Unlock WebAudio + <audio> once on first user gesture so market-driven sounds work later.
+  function installAudioUnlocker() {
+    const unlock = async () => {
+      if (audioUnlocked) return;
+      audioUnlocked = true;
+
+      // Resume WebAudio mixer (TickSonic)
+      try {
+        if (TS_AUDIO.engine) await TS_AUDIO.engine.resume();
+      } catch {}
+
+      // Optional: unlock the HTMLAudioElement used by playSound()
+      // by doing a muted play/pause once.
+      try {
+        if (audio && typeof audio.play === 'function') {
+          const prevMuted = audio.muted;
+          audio.muted = true;
+          const p = audio.play();
+          if (p && typeof p.then === 'function') await p.catch(() => {});
+          audio.pause();
+          audio.currentTime = 0;
+          audio.muted = prevMuted;
+        }
+      } catch {}
+    };
+
+    // capture=true helps ensure we get the gesture even if other handlers stopPropagation
+    window.addEventListener('pointerdown', unlock, { once: true, capture: true });
+    window.addEventListener('keydown', unlock, { once: true, capture: true });
   }
   function beepFallback() {
     try {
@@ -345,7 +380,10 @@
   function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onopen = () => { try { TS_AUDIO.engine && TS_AUDIO.engine.resume(); } catch {} };
+    ws.onopen = () => {
+      // Do NOT call AudioContext.resume() here.
+      // Chrome/Opera require a user gesture; installAudioUnlocker() handles it.
+    };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
@@ -1260,6 +1298,7 @@
   initConfig().then(() => {
     initVol1mChart();
     initObiMiniChart();
+    installAudioUnlocker();
     connectWS();
   });
 
@@ -1465,7 +1504,30 @@
       }
 
       const viewN = Math.max(6, Math.min(this.viewBars, nAll));
-      const series = seriesAll.slice(nAll - viewN);
+      let series = seriesAll.slice(nAll - viewN);
+
+      // Startup edge case: if we have fewer bars than the minimum view window,
+      // pad with zero-volume minutes so we never index undefined.
+      if (series.length < viewN) {
+        const padCount = viewN - series.length;
+        const first = series[0] || seriesAll[0] || {};
+        const firstT0 = Number(first.t0);
+
+        const t0 = Number.isFinite(firstT0)
+          ? firstT0
+          : Math.floor(Date.now() / 60000) * 60000;
+
+        const basePx =
+          (Number.isFinite(Number(first.open)) ? Number(first.open)
+          : (Number.isFinite(Number(first.close)) ? Number(first.close)
+          : (Number.isFinite(Number(this.lastPrice)) ? Number(this.lastPrice) : NaN)));
+
+        const pad = [];
+        for (let i = padCount; i > 0; i--) {
+          pad.push({ t0: t0 - i * 60000, open: basePx, close: basePx, vol: 0 });
+        }
+        series = pad.concat(series);
+      }
 
       let maxVol = 0;
       for (const b of series) maxVol = Math.max(maxVol, Number(b.vol) || 0);
