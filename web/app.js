@@ -1175,6 +1175,12 @@
       els.sym.focus();
       return;
     }
+
+    if (vol1mChart && typeof vol1mChart.reset === 'function') {
+      vol1mChart.reset();
+      setCurrentVolBarBadge(0);
+    }
+
     // Nudge audio context past autoplay restrictions on an explicit click
     try { TS_AUDIO.engine && (await TS_AUDIO.engine.resume()); } catch {}
     const threshold = parseInt(els.thr.value || '0', 10);
@@ -1223,6 +1229,12 @@
   }
   async function stop() {
     clearLoadingTimer();
+
+    if (vol1mChart && typeof vol1mChart.reset === 'function') {
+      vol1mChart.reset();
+      setCurrentVolBarBadge(0);
+    }
+
     const res = await fetch('/api/stop', { method: 'POST' });
     if (!res.ok) {
       const txt = await res.text();
@@ -1338,13 +1350,27 @@
     return Number.isFinite(t) ? t : null;
   }
 
+  // IMPORTANT:
+  // The day-volume number coming from the server is effectively in "hundreds of shares".
+  // Your day Volume display (formatVolumeK) turns that into a K-display you like.
+  // But the 1m volume bars should be in REAL SHARES, so scale here.
+  const VOL_CUM_TO_SHARES = 100;
+
   function onMarketPulse({ price, last, volume, timeISO } = {}) {
     if (!vol1mChart) return;
+
     const ts = _parseTimeISO(timeISO) || Date.now();
     const px = (price != null) ? price : last;
-    vol1mChart.ingest(px, volume, ts);
 
-    // NEW: live current bar volume badge
+    let cumVolShares = volume;
+    if (cumVolShares != null) {
+      const n = Number(cumVolShares);
+      cumVolShares = Number.isFinite(n) ? (n * VOL_CUM_TO_SHARES) : cumVolShares;
+    }
+
+    vol1mChart.ingest(px, cumVolShares, ts);
+
+    // Live current bar badge now reflects REAL SHARES
     setCurrentVolBarBadge(vol1mChart.currentVol());
   }
 
@@ -1379,6 +1405,16 @@
       this._tooltipEl = null;
       this.resize();
       window.addEventListener('resize', () => { this.resize(); this.draw(); });
+    }
+
+    reset() {
+      this.bars.length = 0;
+      this.cur = null;
+      this.lastCumVol = NaN;
+      this.lastPrice = NaN;
+      this._geom = null;
+      this.hideTooltip();
+      this.requestDraw();
     }
 
     resize() {
