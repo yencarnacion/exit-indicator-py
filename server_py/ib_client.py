@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import time
+from typing import Any
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Optional, Tuple, List
@@ -276,19 +277,57 @@ class IBDepthManager:
                 self._on_snapshot(self._symbol, asks, bids)
                 # T&S is event-driven; no draining here.
     
-    def _on_quote_update(self, ticker: Ticker, hasNewData: bool):
+    # NOTE: ib_async event signatures have shifted across 2.x; accept *args defensively.
+    def _on_quote_update(self, ticker: Ticker, *_: Any):
         if ticker is not self._quote_ticker: return
         
         if self._symbol and self._symbol == ticker.contract.symbol:
             lp = getattr(ticker, "last", None)
             if lp is not None and not util.isNan(lp): self._last_price = float(lp)
 
-            vol = getattr(ticker, "volume", None)
+            # ---- Day volume tracking (official baseline + TBT deltas) ----
+            # In ib_async 2.x, quote updates can arrive frequently while the
+            # "official" volume field may lag. If we reset to a stale official
+            # value every update, UI volume will flicker/revert.
+
+            vol = None
+            # Prefer RTVolume stream if present (genericTickList="233").
+            # Some builds expose it as ticker.rtVolume.volume.
+            try:
+                rtv = getattr(ticker, "rtVolume", None)
+                if rtv is not None:
+                    vol = getattr(rtv, "volume", None)
+            except Exception:
+                vol = None
+
+            # Fallback to ticker.volume if rtVolume isn't available/mapped.
+            if vol is None:
+                vol = getattr(ticker, "volume", None)
+
             if vol is not None and not util.isNan(vol):
-                # Reset baseline to official IB day volume; keep UI snappy via TBT deltas
-                self._official_day_volume = int(vol)
-                self._tbt_since_official = 0
-                self._day_volume = self._official_day_volume
+                try:
+                    v_int = int(vol)
+                except Exception:
+                    v_int = None
+
+                if v_int is not None and v_int >= 0:
+                    prev_off = int(self._official_day_volume or 0)
+
+                    # Official baseline must never go backwards.
+                    if self._official_day_volume is None:
+                        self._official_day_volume = v_int
+                    else:
+                        self._official_day_volume = max(prev_off, v_int)
+
+                    # Preserve any already-accumulated TBT delta.
+                    # Keep day volume monotonic too.
+                    cur_day = int(self._day_volume or 0)
+                    base = int(self._official_day_volume or 0)
+                    self._day_volume = max(cur_day, base)
+
+                    # Ensure delta stays consistent after baseline changes.
+                    self._tbt_since_official = max(0, int(self._day_volume) - base)
+
             if DEBUG:
                 log_debug(f"quote update: last={self._last_price} volume={self._day_volume}")
 
@@ -433,13 +472,20 @@ class IBDepthManager:
                                 if util.isNan(price):
                                     continue
                                 # Fast day-volume path: increment from TBT prints between official updates
-                                try:
-                                    base = int(self._official_day_volume or 0)
-                                except Exception:
-                                    base = 0
+                                base = int(self._official_day_volume or 0)
                                 if size > 0:
                                     self._tbt_since_official += size
-                                self._day_volume = base + self._tbt_since_official
+
+                                new_day = base + int(self._tbt_since_official or 0)
+                                # Monotonic guard (shouldn't trigger, but prevents rare "snap back" cases)
+                                if self._day_volume is None:
+                                    self._day_volume = new_day
+                                else:
+                                    self._day_volume = max(int(self._day_volume), new_day)
+
+                                # If we clamped for any reason, keep delta consistent
+                                self._tbt_since_official = max(0, int(self._day_volume) - base)
+
                                 self._last_price = price  # keep last fresh from prints too
                                 # feed micro VWAP buffer
                                 try:
