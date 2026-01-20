@@ -337,15 +337,19 @@ class IBDepthManager:
         if not (self.ib.isConnected() and self._contract and self._micro_window_sec > 0):
             return
         try:
+            # reqHistoricalTicks rule: exactly ONE of startDateTime or endDateTime must be set.
+            # Passing both as "" triggers IB error 10187.
+            from datetime import datetime, timezone
+            end = datetime.now(timezone.utc)
             # reqHistoricalTicks takes a tick-count, not a time delta. We request a modest
             # batch and then time-filter to the micro window.
             ticks = await self.ib.reqHistoricalTicksAsync(
                 contract=self._contract,
                 startDateTime="",
-                endDateTime="",
+                endDateTime=end,
                 numberOfTicks=1000,
                 whatToShow="TRADES",
-                useRth=True,
+                useRth=False,
                 ignoreSize=False,
             )
             now = time.time()
