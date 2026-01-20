@@ -221,14 +221,14 @@ button.secondary { background: #203047; color: #dbe6f2; }
 .vol1m {
   display: block;
   width: 100%;
-  height: 64px; /* tuned for split-second readability without pushing DOM down too far */
+  height: 128px; /* 2x taller */
 }
 body.compact .vol1m-wrap {
   padding: 4px;
   margin-bottom: 8px;
 }
 body.compact .vol1m {
-  height: 44px;
+  height: 88px;
 }
 
 /* Force identical heights for alignment */

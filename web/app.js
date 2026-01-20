@@ -1532,7 +1532,8 @@
       let maxVol = 0;
       for (const b of series) maxVol = Math.max(maxVol, Number(b.vol) || 0);
       const step = this.step;
-      const maxY = Math.max(step, (Math.ceil(maxVol / step) + 1) * step); // +25k headroom
+      const MIN_Y = 100000; // always show at least: 25k, 50k, 75k, 100k
+      const maxY = Math.max(MIN_Y, step, (Math.ceil(maxVol / step) + 1) * step); // +25k headroom
 
       // grid + right-axis labels (0..maxY step 25k)
       ctx.strokeStyle = this.grid;
