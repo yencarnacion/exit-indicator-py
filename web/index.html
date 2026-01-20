@@ -201,10 +201,15 @@
         <span class="chip chip-warn">1.0–1.5×</span>
         <span class="chip chip-hot">1.5–2.0×</span>
         <span class="chip chip-danger">≥2×</span>
-        <span id="rvolBadge"
-              class="badge badge-rvol"
-              style="margin-left:auto"
-              title="RVOL (median baseline). ⚡ = pace alert.">RVOL —</span>
+        <span class="hud-right">
+          <span id="volBarBadge"
+                class="badge badge-volbar"
+                title="Current (forming) 1m volume bar">000,000,000</span>
+
+          <span id="rvolBadge"
+                class="badge badge-rvol"
+                title="RVOL (median baseline). ⚡ = pace alert.">RVOL —</span>
+        </span>
       </div>
 
       <!-- 1m real-time volume chart (replaces the two unused DOM-history graphs) -->

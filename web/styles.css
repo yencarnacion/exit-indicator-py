@@ -63,6 +63,25 @@ h1 { margin: 0; font-size: 22px; font-weight: 700; }
   100% { box-shadow: 0 0 0 14px rgba(255,184,79,0); }
 }
 
+/* Right-side HUD group in the L2 legend (VOL box + RVOL badge) */
+.legend .hud-right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Current 1m bar volume badge (000,000,000) */
+.badge-volbar {
+  background: rgba(79,179,255,0.10);
+  color: var(--accent);
+  border: 1px solid rgba(79,179,255,0.28);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  min-width: 11ch;       /* exactly fits 000,000,000 */
+  text-align: right;
+}
+
 section { background: var(--panel); border: 1px solid #1b2737; border-radius: 8px; padding: 16px; margin-top: 16px; }
 
 .controls { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
@@ -212,6 +231,7 @@ button.secondary { background: #203047; color: #dbe6f2; }
 
 /* --- 1m volume strip (full width) --- */
 .vol1m-wrap {
+  position: relative; /* NEW: anchor for the hover tooltip */
   border: 1px solid #1b2737;
   border-radius: 6px;
   background: #050910;
@@ -222,6 +242,36 @@ button.secondary { background: #203047; color: #dbe6f2; }
   display: block;
   width: 100%;
   height: 128px; /* 2x taller */
+  cursor: crosshair;
+}
+
+/* Hover tooltip for the 1m volume bars */
+.vol-tooltip {
+  position: absolute;
+  z-index: 50;
+  pointer-events: none;
+  background: rgba(17, 23, 35, 0.96);
+  border: 1px solid #1b2737;
+  border-radius: 8px;
+  padding: 6px 8px;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.45);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vol-tooltip.hidden { display: none; }
+
+.vol-tooltip .tt-time {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.vol-tooltip .tt-vol {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
 }
 body.compact .vol1m-wrap {
   padding: 4px;

@@ -38,6 +38,7 @@
     microVwapVal: document.getElementById('microVwapVal'),
     actionHintPill: document.getElementById('actionHintPill'),
     rvolBadge: document.getElementById('rvolBadge'),
+    volBarBadge: document.getElementById('volBarBadge'), // NEW
   };
 
   // --- Orderflow state (client-side only) ---
@@ -106,6 +107,28 @@
     if (!Number.isFinite(v)) return '—';
     const scaled = v / 10;
     return scaled.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' K';
+  }
+
+  // Comma grouping (always uses commas, not locale)
+  function formatCommaInt(n) {
+    const v = Math.max(0, Math.floor(Number(n) || 0));
+    return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  // Fixed-width 9 digits, comma grouped: 000,000,000 (pads up to 9 digits)
+  function formatVolume9(n) {
+    const v = Math.max(0, Math.floor(Number(n) || 0));
+    const s = String(v);
+    const padded = (s.length <= 9) ? s.padStart(9, '0') : s; // if > 9 digits, show full
+    return padded.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function setCurrentVolBarBadge(vol) {
+    if (!els.volBarBadge) return;
+    const v = Math.max(0, Math.floor(Number(vol) || 0));
+    els.volBarBadge.textContent = formatVolume9(v);
+    // Title can be a cleaner, non-padded version
+    els.volBarBadge.title = `Current (forming) 1m volume bar: ${formatCommaInt(v)}`;
   }
   async function initConfig() {
     try {
@@ -1320,6 +1343,9 @@
     const ts = _parseTimeISO(timeISO) || Date.now();
     const px = (price != null) ? price : last;
     vol1mChart.ingest(px, volume, ts);
+
+    // NEW: live current bar volume badge
+    setCurrentVolBarBadge(vol1mChart.currentVol());
   }
 
   class Vol1mChart {
@@ -1346,6 +1372,11 @@
 
       this.dpr = 1;
       this._raf = 0;
+
+      // Hover tooltip state
+      this._geom = null;
+      this._wrapEl = null;
+      this._tooltipEl = null;
       this.resize();
       window.addEventListener('resize', () => { this.resize(); this.draw(); });
     }
@@ -1443,6 +1474,79 @@
       this.requestDraw();
     }
 
+    currentVol() {
+      return this.cur ? (Number(this.cur.vol) || 0) : 0;
+    }
+
+    attachHoverUI(wrapEl, tooltipEl) {
+      this._wrapEl = wrapEl;
+      this._tooltipEl = tooltipEl;
+    }
+
+    hideTooltip() {
+      if (!this._tooltipEl) return;
+      this._tooltipEl.classList.add('hidden');
+    }
+
+    handleHover(e) {
+      if (!this._geom || !this._tooltipEl || !this._wrapEl) return;
+
+      const canvasRect = this.canvas.getBoundingClientRect();
+      const x = e.clientX - canvasRect.left;
+      const y = e.clientY - canvasRect.top;
+
+      const { x0, bw, gap, viewN, series } = this._geom;
+      const totalW = bw * viewN + gap * (viewN - 1);
+
+      // Must be over the bar region (and not in the gap)
+      if (x < x0 || x > x0 + totalW || y < 0 || y > canvasRect.height) {
+        this.hideTooltip();
+        return;
+      }
+
+      const step = bw + gap;
+      let idx = Math.floor((x - x0) / step);
+      idx = Math.max(0, Math.min(viewN - 1, idx));
+
+      const within = (x - x0) - idx * step;
+      if (within > bw) { // cursor is in the gap
+        this.hideTooltip();
+        return;
+      }
+
+      const b = series[idx];
+      if (!b) { this.hideTooltip(); return; }
+
+      const vol = Math.max(0, Math.floor(Number(b.vol) || 0));
+      const t0 = Number(b.t0);
+      const timeLabel = Number.isFinite(t0) ? this._fmtTimeLabel(t0) : '';
+
+      this._tooltipEl.innerHTML = `
+        <div class="tt-time">${timeLabel}</div>
+        <div class="tt-vol">${formatVolume9(vol)}</div>
+      `;
+      this._tooltipEl.classList.remove('hidden');
+
+      // Position near cursor, clamped within the wrap
+      const wrapRect = this._wrapEl.getBoundingClientRect();
+      const mx = e.clientX - wrapRect.left;
+      const my = e.clientY - wrapRect.top;
+
+      const tw = this._tooltipEl.offsetWidth;
+      const th = this._tooltipEl.offsetHeight;
+
+      let left = mx + 10;
+      let top  = my - th - 10;
+
+      if (left + tw > wrapRect.width) left = mx - tw - 10;
+      if (left < 0) left = 0;
+      if (top < 0) top = my + 10;
+      if (top + th > wrapRect.height) top = Math.max(0, wrapRect.height - th);
+
+      this._tooltipEl.style.left = `${left}px`;
+      this._tooltipEl.style.top  = `${top}px`;
+    }
+
     _seriesForDraw() {
       const out = this.bars.slice();
       if (this.cur) out.push({ t0: this.cur.t0, open: this.cur.open, close: this.cur.close, vol: this.cur.vol });
@@ -1495,6 +1599,8 @@
       const seriesAll = this._seriesForDraw();
       const nAll = seriesAll.length;
       if (!nAll) {
+        this._geom = null;
+        this.hideTooltip();
         // draw an empty baseline
         ctx.strokeStyle = this.grid;
         ctx.globalAlpha = 0.9;
@@ -1562,6 +1668,9 @@
       const bw = Math.max(3, Math.floor((innerW - gap * (viewN - 1)) / viewN));
       const totalW = bw * viewN + gap * (viewN - 1);
       const x0 = xL + (innerW - totalW);
+
+      // NEW: hover geometry snapshot
+      this._geom = { x0, bw, gap, viewN, series };
 
       for (let i = 0; i < viewN; i++) {
         const b = series[i];
@@ -1631,6 +1740,25 @@
     if (!c) return;
     vol1mChart = new Vol1mChart(c, { step: 25000, viewBars: 24, maxBars: 240 });
     vol1mChart.draw(); // skeleton immediately
+
+    // NEW: initialize the live badge to zero
+    setCurrentVolBarBadge(0);
+
+    // NEW: hover tooltip
+    const wrap = c.closest('.vol1m-wrap');
+    if (wrap) {
+      let tip = wrap.querySelector('.vol-tooltip');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.className = 'vol-tooltip hidden';
+        wrap.appendChild(tip);
+      }
+      vol1mChart.attachHoverUI(wrap, tip);
+
+      c.addEventListener('mousemove', (e) => vol1mChart.handleHover(e));
+      c.addEventListener('mouseleave', () => vol1mChart.hideTooltip());
+      c.addEventListener('touchstart', () => vol1mChart.hideTooltip(), { passive: true });
+    }
   }
   class ObiMiniChart {
     constructor(canvas, opts = {}) {
